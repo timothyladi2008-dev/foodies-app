@@ -68,7 +68,7 @@ def track_visitors():
 
 
 # ---------------------------------------------------------
-# FRONTEND TEMPLATE (HTML + JS + FIXED PRECISE IMAGES)
+# FRONTEND TEMPLATE (HTML + JS + REMOVE ITEM BUTTON IN CART)
 # ---------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -357,9 +357,9 @@ HTML_TEMPLATE = """
         <span style="cursor: pointer; font-weight: bold; font-size: 18px;" onclick="closeCartModal()">✕</span>
       </div>
 
-      <div id="cart-items-container" style="max-height: 200px; overflow-y: auto; margin-bottom: 16px;"></div>
+      <div id="cart-items-container" style="max-height: 200px; overflow-y: auto; margin-bottom: 16px; padding-right: 4px;"></div>
 
-      <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 16px; margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 16px; margin-bottom: 16px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
         <span>Total:</span>
         <span id="cart-total-price" style="color: var(--primary);">₦0</span>
       </div>
@@ -405,211 +405,66 @@ HTML_TEMPLATE = """
 
     const categories = ["Pizza", "Burgers", "Local", "Sides", "Drinks", "Desserts"];
 
-    // Precise mapping for every individual item name variant so the exact emoji matches the specific meal description/name!
     const preciseEmojiMap = {
       // Pizza
-      "Pepperoni Special": "🍕",
-      "Pepperoni Combo 2": "🍕",
-      "Pepperoni Combo 3": "🍕",
-      "Pepperoni Combo 4": "🍕",
-      "Margherita Special": "🍕",
-      "Margherita Combo 2": "🍕",
-      "Margherita Combo 3": "🍕",
-      "Margherita Combo 4": "🍕",
-      "BBQ Chicken Special": "🍕",
-      "BBQ Chicken Combo 2": "🍕",
-      "BBQ Chicken Combo 3": "🍕",
-      "BBQ Chicken Combo 4": "🍕",
-      "Four Cheese Special": "🧀",
-      "Four Cheese Combo 2": "🧀",
-      "Four Cheese Combo 3": "🧀",
-      "Four Cheese Combo 4": "🧀",
-      "Hawaiian Special": "🍍",
-      "Hawaiian Combo 2": "🍍",
-      "Hawaiian Combo 3": "🍍",
-      "Hawaiian Combo 4": "🍍",
-      "Veggie Delight Special": "🥦",
-      "Veggie Delight Combo 2": "🥦",
-      "Veggie Delight Combo 3": "🥦",
-      "Veggie Delight Combo 4": "🥦",
-      "Meat Feast Special": "🥩",
-      "Meat Feast Combo 2": "🥩",
-      "Meat Feast Combo 3": "🥩",
-      "Meat Feast Combo 4": "🥩",
-      "Truffle Mushroom Special": "🍄",
-      "Truffle Mushroom Combo 2": "🍄",
-      "Truffle Mushroom Combo 3": "🍄",
-      "Truffle Mushroom Combo 4": "🍄",
+      "Pepperoni Special": "🍕", "Pepperoni Combo 2": "🍕", "Pepperoni Combo 3": "🍕", "Pepperoni Combo 4": "🍕",
+      "Margherita Special": "🍕", "Margherita Combo 2": "🍕", "Margherita Combo 3": "🍕", "Margherita Combo 4": "🍕",
+      "BBQ Chicken Special": "🍕", "BBQ Chicken Combo 2": "🍕", "BBQ Chicken Combo 3": "🍕", "BBQ Chicken Combo 4": "🍕",
+      "Four Cheese Special": "🧀", "Four Cheese Combo 2": "🧀", "Four Cheese Combo 3": "🧀", "Four Cheese Combo 4": "🧀",
+      "Hawaiian Special": "🍍", "Hawaiian Combo 2": "🍍", "Hawaiian Combo 3": "🍍", "Hawaiian Combo 4": "🍍",
+      "Veggie Delight Special": "🥦", "Veggie Delight Combo 2": "🥦", "Veggie Delight Combo 3": "🥦", "Veggie Delight Combo 4": "🥦",
+      "Meat Feast Special": "🥩", "Meat Feast Combo 2": "🥩", "Meat Feast Combo 3": "🥩", "Meat Feast Combo 4": "🥩",
+      "Truffle Mushroom Special": "🍄", "Truffle Mushroom Combo 2": "🍄", "Truffle Mushroom Combo 3": "🍄", "Truffle Mushroom Combo 4": "🍄",
 
       // Burgers
-      "Classic Cheese Special": "🍔",
-      "Classic Cheese Combo 2": "🍔",
-      "Classic Cheese Combo 3": "🍔",
-      "Classic Cheese Combo 4": "🍔",
-      "Double Smash Special": "🍔",
-      "Double Smash Combo 2": "🍔",
-      "Double Smash Combo 3": "🍔",
-      "Double Smash Combo 4": "🍔",
-      "Bacon Deluxe Special": "🥓",
-      "Bacon Deluxe Combo 2": "🥓",
-      "Bacon Deluxe Combo 3": "🥓",
-      "Bacon Deluxe Combo 4": "🥓",
-      "Crispy Chicken Special": "🍗",
-      "Crispy Chicken Combo 2": "🍗",
-      "Crispy Chicken Combo 3": "🍗",
-      "Crispy Chicken Combo 4": "🍗",
-      "Veggie Beyond Special": "🥗",
-      "Veggie Beyond Combo 2": "🥗",
-      "Veggie Beyond Combo 3": "🥗",
-      "Veggie Beyond Combo 4": "🥗",
-      "Mushroom Swiss Special": "🍄",
-      "Mushroom Swiss Combo 2": "🍄",
-      "Mushroom Swiss Combo 3": "🍄",
-      "Mushroom Swiss Combo 4": "🍄",
-      "Spicy Zinger Special": "🌶️",
-      "Spicy Zinger Combo 2": "🌶️",
-      "Spicy Zinger Combo 3": "🌶️",
-      "Spicy Zinger Combo 4": "🌶️",
-      "Avocado Beef Special": "🥑",
-      "Avocado Beef Combo 2": "🥑",
-      "Avocado Beef Combo 3": "🥑",
-      "Avocado Beef Combo 4": "🥑",
+      "Classic Cheese Special": "🍔", "Classic Cheese Combo 2": "🍔", "Classic Cheese Combo 3": "🍔", "Classic Cheese Combo 4": "🍔",
+      "Double Smash Special": "🍔", "Double Smash Combo 2": "🍔", "Double Smash Combo 3": "🍔", "Double Smash Combo 4": "🍔",
+      "Bacon Deluxe Special": "🥓", "Bacon Deluxe Combo 2": "🥓", "Bacon Deluxe Combo 3": "🥓", "Bacon Deluxe Combo 4": "🥓",
+      "Crispy Chicken Special": "🍗", "Crispy Chicken Combo 2": "🍗", "Crispy Chicken Combo 3": "🍗", "Crispy Chicken Combo 4": "🍗",
+      "Veggie Beyond Special": "🥗", "Veggie Beyond Combo 2": "🥗", "Veggie Beyond Combo 3": "🥗", "Veggie Beyond Combo 4": "🥗",
+      "Mushroom Swiss Special": "🍄", "Mushroom Swiss Combo 2": "🍄", "Mushroom Swiss Combo 3": "🍄", "Mushroom Swiss Combo 4": "🍄",
+      "Spicy Zinger Special": "🌶️", "Spicy Zinger Combo 2": "🌶️", "Spicy Zinger Combo 3": "🌶️", "Spicy Zinger Combo 4": "🌶️",
+      "Avocado Beef Special": "🥑", "Avocado Beef Combo 2": "🥑", "Avocado Beef Combo 3": "🥑", "Avocado Beef Combo 4": "🥑",
 
       // Local
-      "Smokey Jollof Special": "🍛",
-      "Smokey Jollof Combo 2": "🍛",
-      "Smokey Jollof Combo 3": "🍛",
-      "Smokey Jollof Combo 4": "🍛",
-      "Suya Skewers Special": "🍢",
-      "Suya Skewers Combo 2": "🍢",
-      "Suya Skewers Combo 3": "🍢",
-      "Suya Skewers Combo 4": "🍢",
-      "Egusi Special Special": "🍲",
-      "Egusi Special Combo 2": "🍲",
-      "Egusi Special Combo 3": "🍲",
-      "Egusi Special Combo 4": "🍲",
-      "Fried Rice Special": "🍛",
-      "Fried Rice Combo 2": "🍛",
-      "Fried Rice Combo 3": "🍛",
-      "Fried Rice Combo 4": "🍛",
-      "Ofada Delicacy Special": "🍚",
-      "Ofada Delicacy Combo 2": "🍚",
-      "Ofada Delicacy Combo 3": "🍚",
-      "Ofada Delicacy Combo 4": "🍚",
-      "Spicy Asun Special": "🍖",
-      "Spicy Asun Combo 2": "🍖",
-      "Spicy Asun Combo 3": "🍖",
-      "Spicy Asun Combo 4": "🍖",
-      "Fisherman Soup Special": "🍲",
-      "Fisherman Soup Combo 2": "🍲",
-      "Fisherman Soup Combo 3": "🍲",
-      "Fisherman Soup Combo 4": "🍲",
-      "Pepper Soup Special": "🥣",
-      "Pepper Soup Combo 2": "🥣",
-      "Pepper Soup Combo 3": "🥣",
-      "Pepper Soup Combo 4": "🥣",
+      "Smokey Jollof Special": "🍛", "Smokey Jollof Combo 2": "🍛", "Smokey Jollof Combo 3": "🍛", "Smokey Jollof Combo 4": "🍛",
+      "Suya Skewers Special": "🍢", "Suya Skewers Combo 2": "🍢", "Suya Skewers Combo 3": "🍢", "Suya Skewers Combo 4": "🍢",
+      "Egusi Special Special": "🍲", "Egusi Special Combo 2": "🍲", "Egusi Special Combo 3": "🍲", "Egusi Special Combo 4": "🍲",
+      "Fried Rice Special": "🍛", "Fried Rice Combo 2": "🍛", "Fried Rice Combo 3": "🍛", "Fried Rice Combo 4": "🍛",
+      "Ofada Delicacy Special": "🍚", "Ofada Delicacy Combo 2": "🍚", "Ofada Delicacy Combo 3": "🍚", "Ofada Delicacy Combo 4": "🍚",
+      "Spicy Asun Special": "🍖", "Spicy Asun Combo 2": "🍖", "Spicy Asun Combo 3": "🍖", "Spicy Asun Combo 4": "🍖",
+      "Fisherman Soup Special": "🍲", "Fisherman Soup Combo 2": "🍲", "Fisherman Soup Combo 3": "🍲", "Fisherman Soup Combo 4": "🍲",
+      "Pepper Soup Special": "🥣", "Pepper Soup Combo 2": "🥣", "Pepper Soup Combo 3": "🥣", "Pepper Soup Combo 4": "🥣",
 
       // Sides
-      "Crispy Fries Special": "🍟",
-      "Crispy Fries Combo 2": "🍟",
-      "Crispy Fries Combo 3": "🍟",
-      "Crispy Fries Combo 4": "🍟",
-      "Onion Rings Special": "🧅",
-      "Onion Rings Combo 2": "🧅",
-      "Onion Rings Combo 3": "🧅",
-      "Onion Rings Combo 4": "🧅",
-      "Garlic Bread Special": "🍞",
-      "Garlic Bread Combo 2": "🍞",
-      "Garlic Bread Combo 3": "🍞",
-      "Garlic Bread Combo 4": "🍞",
-      "Coleslaw Special": "🥗",
-      "Coleslaw Combo 2": "🥗",
-      "Coleslaw Combo 3": "🥗",
-      "Coleslaw Combo 4": "🥗",
-      "Mozzarella Sticks Special": "🧀",
-      "Mozzarella Sticks Combo 2": "🧀",
-      "Mozzarella Sticks Combo 3": "🧀",
-      "Mozzarella Sticks Combo 4": "🧀",
-      "Sweet Potato Fries Special": "🍠",
-      "Sweet Potato Fries Combo 2": "🍠",
-      "Sweet Potato Fries Combo 3": "🍠",
-      "Sweet Potato Fries Combo 4": "🍠",
-      "Mac & Cheese Special": "🧀",
-      "Mac & Cheese Combo 2": "🧀",
-      "Mac & Cheese Combo 3": "🧀",
-      "Mac & Cheese Combo 4": "🧀",
-      "Potato Wedges Special": "🥔",
-      "Potato Wedges Combo 2": "🥔",
-      "Potato Wedges Combo 3": "🥔",
-      "Potato Wedges Combo 4": "🥔",
+      "Crispy Fries Special": "🍟", "Crispy Fries Combo 2": "🍟", "Crispy Fries Combo 3": "🍟", "Crispy Fries Combo 4": "🍟",
+      "Onion Rings Special": "🧅", "Onion Rings Combo 2": "🧅", "Onion Rings Combo 3": "🧅", "Onion Rings Combo 4": "🧅",
+      "Garlic Bread Special": "🍞", "Garlic Bread Combo 2": "🍞", "Garlic Bread Combo 3": "🍞", "Garlic Bread Combo 4": "🍞",
+      "Coleslaw Special": "🥗", "Coleslaw Combo 2": "🥗", "Coleslaw Combo 3": "🥗", "Coleslaw Combo 4": "🥗",
+      "Mozzarella Sticks Special": "🧀", "Mozzarella Sticks Combo 2": "🧀", "Mozzarella Sticks Combo 3": "🧀", "Mozzarella Sticks Combo 4": "🧀",
+      "Sweet Potato Fries Special": "🍠", "Sweet Potato Fries Combo 2": "🍠", "Sweet Potato Fries Combo 3": "🍠", "Sweet Potato Fries Combo 4": "🍠",
+      "Mac & Cheese Special": "🧀", "Mac & Cheese Combo 2": "🧀", "Mac & Cheese Combo 3": "🧀", "Mac & Cheese Combo 4": "🧀",
+      "Potato Wedges Special": "🥔", "Potato Wedges Combo 2": "🥔", "Potato Wedges Combo 3": "🥔", "Potato Wedges Combo 4": "🥔",
 
       // Drinks
-      "Iced Cola Special": "🥤",
-      "Iced Cola Combo 2": "🥤",
-      "Iced Cola Combo 3": "🥤",
-      "Iced Cola Combo 4": "🥤",
-      "Fresh Lemonade Special": "🍋",
-      "Fresh Lemonade Combo 2": "🍋",
-      "Fresh Lemonade Combo 3": "🍋",
-      "Fresh Lemonade Combo 4": "🍋",
-      "Orange Juice Special": "🧃",
-      "Orange Juice Combo 2": "🧃",
-      "Orange Juice Combo 3": "🧃",
-      "Orange Juice Combo 4": "🧃",
-      "Vanilla Milkshake Special": "🥛",
-      "Vanilla Milkshake Combo 2": "🥛",
-      "Vanilla Milkshake Combo 3": "🥛",
-      "Vanilla Milkshake Combo 4": "🥛",
-      "Iced Peach Tea Special": "🧋",
-      "Iced Peach Tea Combo 2": "🧋",
-      "Iced Peach Tea Combo 3": "🧋",
-      "Iced Peach Tea Combo 4": "🧋",
-      "Sparkling Soda Special": "🫧",
-      "Sparkling Soda Combo 2": "🫧",
-      "Sparkling Soda Combo 3": "🫧",
-      "Sparkling Soda Combo 4": "🫧",
-      "Mango Smoothie Special": "🥭",
-      "Mango Smoothie Combo 2": "🥭",
-      "Mango Smoothie Combo 3": "🥭",
-      "Mango Smoothie Combo 4": "🥭",
-      "Special Chapman Special": "🍹",
-      "Special Chapman Combo 2": "🍹",
-      "Special Chapman Combo 3": "🍹",
-      "Special Chapman Combo 4": "🍹",
+      "Iced Cola Special": "🥤", "Iced Cola Combo 2": "🥤", "Iced Cola Combo 3": "🥤", "Iced Cola Combo 4": "🥤",
+      "Fresh Lemonade Special": "🍋", "Fresh Lemonade Combo 2": "🍋", "Fresh Lemonade Combo 3": "🍋", "Fresh Lemonade Combo 4": "🍋",
+      "Orange Juice Special": "🧃", "Orange Juice Combo 2": "🧃", "Orange Juice Combo 3": "🧃", "Orange Juice Combo 4": "🧃",
+      "Vanilla Milkshake Special": "🥛", "Vanilla Milkshake Combo 2": "🥛", "Vanilla Milkshake Combo 3": "🥛", "Vanilla Milkshake Combo 4": "🥛",
+      "Iced Peach Tea Special": "🧋", "Iced Peach Tea Combo 2": "🧋", "Iced Peach Tea Combo 3": "🧋", "Iced Peach Tea Combo 4": "🧋",
+      "Sparkling Soda Special": "🫧", "Sparkling Soda Combo 2": "🫧", "Sparkling Soda Combo 3": "🫧", "Sparkling Soda Combo 4": "🫧",
+      "Mango Smoothie Special": "🥭", "Mango Smoothie Combo 2": "🥭", "Mango Smoothie Combo 3": "🥭", "Mango Smoothie Combo 4": "🥭",
+      "Special Chapman Special": "🍹", "Special Chapman Combo 2": "🍹", "Special Chapman Combo 3": "🍹", "Special Chapman Combo 4": "🍹",
 
       // Desserts
-      "Lava Cake Special": "🍫",
-      "Lava Cake Combo 2": "🍫",
-      "Lava Cake Combo 3": "🍫",
-      "Lava Cake Combo 4": "🍫",
-      "NY Cheesecake Special": "🍰",
-      "NY Cheesecake Combo 2": "🍰",
-      "NY Cheesecake Combo 3": "🍰",
-      "NY Cheesecake Combo 4": "🍰",
-      "Apple Pie Special": "🥧",
-      "Apple Pie Combo 2": "🥧",
-      "Apple Pie Combo 3": "🥧",
-      "Apple Pie Combo 4": "🥧",
-      "Ice Cream Sundae Special": "🍨",
-      "Ice Cream Sundae Combo 2": "🍨",
-      "Ice Cream Sundae Combo 3": "🍨",
-      "Ice Cream Sundae Combo 4": "🍨",
-      "Fudge Brownie Special": "🥮",
-      "Fudge Brownie Combo 2": "🥮",
-      "Fudge Brownie Combo 3": "🥮",
-      "Fudge Brownie Combo 4": "🥮",
-      "Tiramisu Special": "🍮",
-      "Tiramisu Combo 2": "🍮",
-      "Tiramisu Combo 3": "🍮",
-      "Tiramisu Combo 4": "🍮",
-      "Belgian Waffle Special": "🧇",
-      "Belgian Waffle Combo 2": "🧇",
-      "Belgian Waffle Combo 3": "🧇",
-      "Belgian Waffle Combo 4": "🧇",
-      "Glazed Donut Special": "🍩",
-      "Glazed Donut Combo 2": "🍩",
-      "Glazed Donut Combo 3": "🍩",
-      "Glazed Donut Combo 4": "🍩"
+      "Lava Cake Special": "🍫", "Lava Cake Combo 2": "🍫", "Lava Cake Combo 3": "🍫", "Lava Cake Combo 4": "🍫",
+      "NY Cheesecake Special": "🍰", "NY Cheesecake Combo 2": "🍰", "NY Cheesecake Combo 3": "🍰", "NY Cheesecake Combo 4": "🍰",
+      "Apple Pie Special": "🥧", "Apple Pie Combo 2": "🥧", "Apple Pie Combo 3": "🥧", "Apple Pie Combo 4": "🥧",
+      "Ice Cream Sundae Special": "🍨", "Ice Cream Sundae Combo 2": "🍨", "Ice Cream Sundae Combo 3": "🍨", "Ice Cream Sundae Combo 4": "🍨",
+      "Fudge Brownie Special": "🥮", "Fudge Brownie Combo 2": "🥮", "Fudge Brownie Combo 3": "🥮", "Fudge Brownie Combo 4": "🥮",
+      "Tiramisu Special": "🍮", "Tiramisu Combo 2": "🍮", "Tiramisu Combo 3": "🍮", "Tiramisu Combo 4": "🍮",
+      "Belgian Waffle Special": "🧇", "Belgian Waffle Combo 2": "🧇", "Belgian Waffle Combo 3": "🧇", "Belgian Waffle Combo 4": "🧇",
+      "Glazed Donut Special": "🍩", "Glazed Donut Combo 2": "🍩", "Glazed Donut Combo 3": "🍩", "Glazed Donut Combo 4": "🍩"
     };
 
     const itemPrefixes = {
@@ -630,7 +485,6 @@ HTML_TEMPLATE = """
       const variantNum = Math.floor((i - 1) / (categories.length * prefixes.length)) + 1;
       const name = variantNum > 1 ? `${baseName} Combo ${variantNum}` : `${baseName} Special`;
 
-      // Fetch precise mapped emoji matching the exact name, fallback to a general category icon if missing
       const assignedEmoji = preciseEmojiMap[name] || "🍽️";
 
       foodItems.push({
@@ -767,9 +621,21 @@ HTML_TEMPLATE = """
 
     function addToCart(id) {
       const item = foodItems.find(f => f.id === id);
-      cart.push(item);
+      // Push a unique cart entry ID to easily delete specific items even if they have the same name/id
+      cart.push({ ...item, cartInstanceId: Date.now() + Math.random() });
       updateCartUI();
       showToast(`${item.name} added to cart`);
+    }
+
+    function removeFromCart(cartInstanceId) {
+      const index = cart.findIndex(item => item.cartInstanceId === cartInstanceId);
+      if (index !== -1) {
+        const removedItem = cart[index];
+        cart.splice(index, 1);
+        openCartModal(); // Refresh cart modal view
+        updateCartUI();
+        showToast(`Removed ${removedItem.name} from cart`);
+      }
     }
 
     function updateCartUI() {
@@ -781,15 +647,25 @@ HTML_TEMPLATE = """
       container.innerHTML = '';
       let total = 0;
 
-      cart.forEach((item) => {
-        total += item.price;
-        container.innerHTML += `
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:13px;">
-            <span>${item.emoji} ${item.name}</span>
-            <b>₦${item.price.toLocaleString()}</b>
-          </div>
-        `;
-      });
+      if (cart.length === 0) {
+        container.innerHTML = `<div style="text-align: center; color: #64748b; font-size: 13px; padding: 20px;">Your cart is empty</div>`;
+      } else {
+        cart.forEach((item) => {
+          total += item.price;
+          container.innerHTML += `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #f1f5f9; font-size: 13px;">
+              <div style="display: flex; align-items: center; gap: 8px; overflow: hidden;">
+                <span style="font-size: 20px;">${item.emoji}</span>
+                <span style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;">${item.name}</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <b style="color: var(--primary);">₦${item.price.toLocaleString()}</b>
+                <button onclick="removeFromCart(${item.cartInstanceId})" style="background: #fee2e2; color: #ef4444; border: none; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer;">Remove</button>
+              </div>
+            </div>
+          `;
+        });
+      }
 
       document.getElementById('cart-total-price').innerText = `₦${total.toLocaleString()}`;
       document.getElementById('cartModal').classList.remove('hidden');
