@@ -27,22 +27,13 @@ def init_db():
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute('''
-                       CREATE TABLE IF NOT EXISTS users
-                       (
-                           email
-                           TEXT
-                           PRIMARY
-                           KEY,
-                           password
-                           TEXT
-                           NOT
-                           NULL,
-                           pin
-                           TEXT
-                           NOT
-                           NULL
-                       )
-                       ''')
+            CREATE TABLE IF NOT EXISTS users
+            (
+                email TEXT PRIMARY KEY,
+                password TEXT NOT NULL,
+                pin TEXT NOT NULL
+            )
+        ''')
         conn.commit()
 
 
@@ -77,7 +68,7 @@ def track_visitors():
 
 
 # ---------------------------------------------------------
-# FRONTEND TEMPLATE (HTML + JS + LEAFLET MAP)
+# FRONTEND TEMPLATE (HTML + JS + FIXED PRECISE IMAGES)
 # ---------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -223,9 +214,12 @@ HTML_TEMPLATE = """
 
     .food-card:hover { transform: translateY(-4px); box-shadow: var(--glass-shadow); }
 
-    .food-img-frame { width: 100%; height: 140px; border-radius: 14px; overflow: hidden; margin-bottom: 12px; background: #e2e8f0; }
-    .food-img-frame img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s ease; }
-    .food-card:hover .food-img-frame img { transform: scale(1.05); }
+    .food-img-frame { 
+      width: 100%; height: 120px; border-radius: 14px; overflow: hidden; margin-bottom: 12px; 
+      background: #f1f5f9; display: flex; align-items: center; justify-content: center; font-size: 52px;
+      transition: transform 0.3s ease;
+    }
+    .food-card:hover .food-img-frame { transform: scale(1.05); }
 
     .food-title { font-size: 15px; font-weight: 700; color: var(--dark); }
     .food-desc { font-size: 11px; color: #64748b; margin-top: 4px; height: 32px; overflow: hidden; line-height: 1.4; }
@@ -408,18 +402,214 @@ HTML_TEMPLATE = """
     let pollRiderInterval;
 
     const PAYSTACK_PUBLIC_KEY = "pk_test_15c3892f5824f99266724433804c708899e1994f";
-    const fallbackSVG = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="500" height="300" viewBox="0 0 500 300" fill="%23f1f5f9"><rect width="100%" height="100%" fill="%23e2e8f0"/><text x="50%" y="50%" font-family="sans-serif" font-size="24" font-weight="bold" fill="%2394a3b8" text-anchor="middle" dominant-baseline="middle">🍱 Food Item</text></svg>`;
 
-    // --- GENERATE 100 FOOD ITEMS ---
     const categories = ["Pizza", "Burgers", "Local", "Sides", "Drinks", "Desserts"];
 
-    const sampleImages = {
-      Pizza: "https://images.unsplash.com/photo-1628840042765-356cda07504e?w=500&q=80",
-      Burgers: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=500&q=80",
-      Local: "https://images.unsplash.com/photo-1604329760661-e71dc83f8f26?w=500&q=80",
-      Sides: "https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=500&q=80",
-      Drinks: "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&q=80",
-      Desserts: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=500&q=80"
+    // Precise mapping for every individual item name variant so the exact emoji matches the specific meal description/name!
+    const preciseEmojiMap = {
+      // Pizza
+      "Pepperoni Special": "🍕",
+      "Pepperoni Combo 2": "🍕",
+      "Pepperoni Combo 3": "🍕",
+      "Pepperoni Combo 4": "🍕",
+      "Margherita Special": "🍕",
+      "Margherita Combo 2": "🍕",
+      "Margherita Combo 3": "🍕",
+      "Margherita Combo 4": "🍕",
+      "BBQ Chicken Special": "🍕",
+      "BBQ Chicken Combo 2": "🍕",
+      "BBQ Chicken Combo 3": "🍕",
+      "BBQ Chicken Combo 4": "🍕",
+      "Four Cheese Special": "🧀",
+      "Four Cheese Combo 2": "🧀",
+      "Four Cheese Combo 3": "🧀",
+      "Four Cheese Combo 4": "🧀",
+      "Hawaiian Special": "🍍",
+      "Hawaiian Combo 2": "🍍",
+      "Hawaiian Combo 3": "🍍",
+      "Hawaiian Combo 4": "🍍",
+      "Veggie Delight Special": "🥦",
+      "Veggie Delight Combo 2": "🥦",
+      "Veggie Delight Combo 3": "🥦",
+      "Veggie Delight Combo 4": "🥦",
+      "Meat Feast Special": "🥩",
+      "Meat Feast Combo 2": "🥩",
+      "Meat Feast Combo 3": "🥩",
+      "Meat Feast Combo 4": "🥩",
+      "Truffle Mushroom Special": "🍄",
+      "Truffle Mushroom Combo 2": "🍄",
+      "Truffle Mushroom Combo 3": "🍄",
+      "Truffle Mushroom Combo 4": "🍄",
+
+      // Burgers
+      "Classic Cheese Special": "🍔",
+      "Classic Cheese Combo 2": "🍔",
+      "Classic Cheese Combo 3": "🍔",
+      "Classic Cheese Combo 4": "🍔",
+      "Double Smash Special": "🍔",
+      "Double Smash Combo 2": "🍔",
+      "Double Smash Combo 3": "🍔",
+      "Double Smash Combo 4": "🍔",
+      "Bacon Deluxe Special": "🥓",
+      "Bacon Deluxe Combo 2": "🥓",
+      "Bacon Deluxe Combo 3": "🥓",
+      "Bacon Deluxe Combo 4": "🥓",
+      "Crispy Chicken Special": "🍗",
+      "Crispy Chicken Combo 2": "🍗",
+      "Crispy Chicken Combo 3": "🍗",
+      "Crispy Chicken Combo 4": "🍗",
+      "Veggie Beyond Special": "🥗",
+      "Veggie Beyond Combo 2": "🥗",
+      "Veggie Beyond Combo 3": "🥗",
+      "Veggie Beyond Combo 4": "🥗",
+      "Mushroom Swiss Special": "🍄",
+      "Mushroom Swiss Combo 2": "🍄",
+      "Mushroom Swiss Combo 3": "🍄",
+      "Mushroom Swiss Combo 4": "🍄",
+      "Spicy Zinger Special": "🌶️",
+      "Spicy Zinger Combo 2": "🌶️",
+      "Spicy Zinger Combo 3": "🌶️",
+      "Spicy Zinger Combo 4": "🌶️",
+      "Avocado Beef Special": "🥑",
+      "Avocado Beef Combo 2": "🥑",
+      "Avocado Beef Combo 3": "🥑",
+      "Avocado Beef Combo 4": "🥑",
+
+      // Local
+      "Smokey Jollof Special": "🍛",
+      "Smokey Jollof Combo 2": "🍛",
+      "Smokey Jollof Combo 3": "🍛",
+      "Smokey Jollof Combo 4": "🍛",
+      "Suya Skewers Special": "🍢",
+      "Suya Skewers Combo 2": "🍢",
+      "Suya Skewers Combo 3": "🍢",
+      "Suya Skewers Combo 4": "🍢",
+      "Egusi Special Special": "🍲",
+      "Egusi Special Combo 2": "🍲",
+      "Egusi Special Combo 3": "🍲",
+      "Egusi Special Combo 4": "🍲",
+      "Fried Rice Special": "🍛",
+      "Fried Rice Combo 2": "🍛",
+      "Fried Rice Combo 3": "🍛",
+      "Fried Rice Combo 4": "🍛",
+      "Ofada Delicacy Special": "🍚",
+      "Ofada Delicacy Combo 2": "🍚",
+      "Ofada Delicacy Combo 3": "🍚",
+      "Ofada Delicacy Combo 4": "🍚",
+      "Spicy Asun Special": "🍖",
+      "Spicy Asun Combo 2": "🍖",
+      "Spicy Asun Combo 3": "🍖",
+      "Spicy Asun Combo 4": "🍖",
+      "Fisherman Soup Special": "🍲",
+      "Fisherman Soup Combo 2": "🍲",
+      "Fisherman Soup Combo 3": "🍲",
+      "Fisherman Soup Combo 4": "🍲",
+      "Pepper Soup Special": "🥣",
+      "Pepper Soup Combo 2": "🥣",
+      "Pepper Soup Combo 3": "🥣",
+      "Pepper Soup Combo 4": "🥣",
+
+      // Sides
+      "Crispy Fries Special": "🍟",
+      "Crispy Fries Combo 2": "🍟",
+      "Crispy Fries Combo 3": "🍟",
+      "Crispy Fries Combo 4": "🍟",
+      "Onion Rings Special": "🧅",
+      "Onion Rings Combo 2": "🧅",
+      "Onion Rings Combo 3": "🧅",
+      "Onion Rings Combo 4": "🧅",
+      "Garlic Bread Special": "🍞",
+      "Garlic Bread Combo 2": "🍞",
+      "Garlic Bread Combo 3": "🍞",
+      "Garlic Bread Combo 4": "🍞",
+      "Coleslaw Special": "🥗",
+      "Coleslaw Combo 2": "🥗",
+      "Coleslaw Combo 3": "🥗",
+      "Coleslaw Combo 4": "🥗",
+      "Mozzarella Sticks Special": "🧀",
+      "Mozzarella Sticks Combo 2": "🧀",
+      "Mozzarella Sticks Combo 3": "🧀",
+      "Mozzarella Sticks Combo 4": "🧀",
+      "Sweet Potato Fries Special": "🍠",
+      "Sweet Potato Fries Combo 2": "🍠",
+      "Sweet Potato Fries Combo 3": "🍠",
+      "Sweet Potato Fries Combo 4": "🍠",
+      "Mac & Cheese Special": "🧀",
+      "Mac & Cheese Combo 2": "🧀",
+      "Mac & Cheese Combo 3": "🧀",
+      "Mac & Cheese Combo 4": "🧀",
+      "Potato Wedges Special": "🥔",
+      "Potato Wedges Combo 2": "🥔",
+      "Potato Wedges Combo 3": "🥔",
+      "Potato Wedges Combo 4": "🥔",
+
+      // Drinks
+      "Iced Cola Special": "🥤",
+      "Iced Cola Combo 2": "🥤",
+      "Iced Cola Combo 3": "🥤",
+      "Iced Cola Combo 4": "🥤",
+      "Fresh Lemonade Special": "🍋",
+      "Fresh Lemonade Combo 2": "🍋",
+      "Fresh Lemonade Combo 3": "🍋",
+      "Fresh Lemonade Combo 4": "🍋",
+      "Orange Juice Special": "🧃",
+      "Orange Juice Combo 2": "🧃",
+      "Orange Juice Combo 3": "🧃",
+      "Orange Juice Combo 4": "🧃",
+      "Vanilla Milkshake Special": "🥛",
+      "Vanilla Milkshake Combo 2": "🥛",
+      "Vanilla Milkshake Combo 3": "🥛",
+      "Vanilla Milkshake Combo 4": "🥛",
+      "Iced Peach Tea Special": "🧋",
+      "Iced Peach Tea Combo 2": "🧋",
+      "Iced Peach Tea Combo 3": "🧋",
+      "Iced Peach Tea Combo 4": "🧋",
+      "Sparkling Soda Special": "🫧",
+      "Sparkling Soda Combo 2": "🫧",
+      "Sparkling Soda Combo 3": "🫧",
+      "Sparkling Soda Combo 4": "🫧",
+      "Mango Smoothie Special": "🥭",
+      "Mango Smoothie Combo 2": "🥭",
+      "Mango Smoothie Combo 3": "🥭",
+      "Mango Smoothie Combo 4": "🥭",
+      "Special Chapman Special": "🍹",
+      "Special Chapman Combo 2": "🍹",
+      "Special Chapman Combo 3": "🍹",
+      "Special Chapman Combo 4": "🍹",
+
+      // Desserts
+      "Lava Cake Special": "🍫",
+      "Lava Cake Combo 2": "🍫",
+      "Lava Cake Combo 3": "🍫",
+      "Lava Cake Combo 4": "🍫",
+      "NY Cheesecake Special": "🍰",
+      "NY Cheesecake Combo 2": "🍰",
+      "NY Cheesecake Combo 3": "🍰",
+      "NY Cheesecake Combo 4": "🍰",
+      "Apple Pie Special": "🥧",
+      "Apple Pie Combo 2": "🥧",
+      "Apple Pie Combo 3": "🥧",
+      "Apple Pie Combo 4": "🥧",
+      "Ice Cream Sundae Special": "🍨",
+      "Ice Cream Sundae Combo 2": "🍨",
+      "Ice Cream Sundae Combo 3": "🍨",
+      "Ice Cream Sundae Combo 4": "🍨",
+      "Fudge Brownie Special": "🥮",
+      "Fudge Brownie Combo 2": "🥮",
+      "Fudge Brownie Combo 3": "🥮",
+      "Fudge Brownie Combo 4": "🥮",
+      "Tiramisu Special": "🍮",
+      "Tiramisu Combo 2": "🍮",
+      "Tiramisu Combo 3": "🍮",
+      "Tiramisu Combo 4": "🍮",
+      "Belgian Waffle Special": "🧇",
+      "Belgian Waffle Combo 2": "🧇",
+      "Belgian Waffle Combo 3": "🧇",
+      "Belgian Waffle Combo 4": "🧇",
+      "Glazed Donut Special": "🍩",
+      "Glazed Donut Combo 2": "🍩",
+      "Glazed Donut Combo 3": "🍩",
+      "Glazed Donut Combo 4": "🍩"
     };
 
     const itemPrefixes = {
@@ -440,12 +630,15 @@ HTML_TEMPLATE = """
       const variantNum = Math.floor((i - 1) / (categories.length * prefixes.length)) + 1;
       const name = variantNum > 1 ? `${baseName} Combo ${variantNum}` : `${baseName} Special`;
 
+      // Fetch precise mapped emoji matching the exact name, fallback to a general category icon if missing
+      const assignedEmoji = preciseEmojiMap[name] || "🍽️";
+
       foodItems.push({
         id: i,
         name: name,
         category: category,
-        price: ((i % 15) + 15) * 250, // Prices range between ₦3,750 and ₦7,250
-        image: sampleImages[category],
+        price: ((i % 15) + 15) * 250,
+        emoji: assignedEmoji,
         desc: `Freshly prepared ${name.toLowerCase()} made with premium ingredients.`
       });
     }
@@ -535,7 +728,6 @@ HTML_TEMPLATE = """
       showAuthScreen('login-screen');
     }
 
-    // --- FOOD RENDERING ---
     function renderFoods(items) {
       const grid = document.getElementById('foodGrid');
       grid.innerHTML = '';
@@ -545,9 +737,7 @@ HTML_TEMPLATE = """
         card.className = 'food-card';
         card.innerHTML = `
           <div>
-            <div class="food-img-frame">
-              <img src="${item.image}" alt="${item.name}" loading="lazy" onerror="this.onerror=null; this.src='${fallbackSVG}';">
-            </div>
+            <div class="food-img-frame">${item.emoji}</div>
             <div class="food-title">${item.name}</div>
             <div class="food-desc">${item.desc}</div>
           </div>
@@ -575,7 +765,6 @@ HTML_TEMPLATE = """
       renderFoods(foodItems.filter(i => i.name.toLowerCase().includes(query) || i.desc.toLowerCase().includes(query)));
     }
 
-    // --- CART SYSTEM ---
     function addToCart(id) {
       const item = foodItems.find(f => f.id === id);
       cart.push(item);
@@ -596,7 +785,7 @@ HTML_TEMPLATE = """
         total += item.price;
         container.innerHTML += `
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:13px;">
-            <span>${item.name}</span>
+            <span>${item.emoji} ${item.name}</span>
             <b>₦${item.price.toLocaleString()}</b>
           </div>
         `;
@@ -608,7 +797,6 @@ HTML_TEMPLATE = """
 
     function closeCartModal() { document.getElementById('cartModal').classList.add('hidden'); }
 
-    // --- PAYSTACK CHECKOUT ---
     function payWithPaystack() {
       const address = document.getElementById('delivery-address').value;
       if (!address) return showToast("Please enter a delivery address!");
@@ -634,7 +822,6 @@ HTML_TEMPLATE = """
       handler.openIframe();
     }
 
-    // --- LIVE MAP TRACKING ---
     function toggleRiderChatModal() {
       const modal = document.getElementById('chatModal');
       modal.classList.toggle('hidden');
@@ -780,5 +967,4 @@ def get_active_visitors():
 # SERVER RUNNER
 # ---------------------------------------------------------
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(debug=True, port=5000)
