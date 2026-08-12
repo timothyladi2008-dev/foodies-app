@@ -4,13 +4,12 @@ import os
 from flask import Flask, jsonify, request, session, render_template_string
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "super_secret_foodies_key")
+# Use a permanent hardcoded secret key so session tokens survive server reloads or restarts!
+app.secret_key = "foodies_permanent_secure_session_key_2026"
 DB_FILE = "users.db"
 
-# Track active visitors (IP Address -> Last Active Timestamp)
 active_visitors = {}
 
-# Simulated live rider tracking coordinates
 rider_status = {
     "lat": 9.05785,
     "lng": 7.49508,
@@ -53,7 +52,7 @@ def get_user(email):
 def save_user(email, password, pin):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (email, password, pin) VALUES (?, ?, ?)", (email, password, pin))
+        cursor.execute("INSERT OR REPLACE INTO users (email, password, pin) VALUES (?, ?, ?)", (email, password, pin))
         conn.commit()
 
 
@@ -63,12 +62,11 @@ def extract_username(email):
 
 @app.before_request
 def track_visitors():
-    """Middleware to track user activity in real time."""
     active_visitors[request.remote_addr] = time.time()
 
 
 # ---------------------------------------------------------
-# FRONTEND TEMPLATE (HTML + JS + REMOVE ITEM BUTTON IN CART)
+# FRONTEND TEMPLATE (HTML + JS + PERSISTENT LOCALSTORAGE LOGIN)
 # ---------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -497,6 +495,15 @@ HTML_TEMPLATE = """
       });
     }
 
+    // Check device local storage on page load so user stays logged in across sessions!
+    window.addEventListener('DOMContentLoaded', () => {
+      const savedEmail = localStorage.getItem('foodies_user_email');
+      const savedUsername = localStorage.getItem('foodies_user_username');
+      if (savedEmail && savedUsername) {
+        openMenu(savedEmail, savedUsername);
+      }
+    });
+
     function showToast(msg) {
       const toast = document.getElementById('toast');
       toast.innerText = msg;
@@ -511,6 +518,10 @@ HTML_TEMPLATE = """
 
     function openMenu(email, username) {
       activeUserEmail = email;
+      // Save credentials in browser localStorage so it saves for future purpose on user's phone!
+      localStorage.setItem('foodies_user_email', email);
+      localStorage.setItem('foodies_user_username', username);
+
       document.getElementById('auth-wrapper').classList.add('hidden');
       document.getElementById('menu-wrapper').classList.remove('hidden');
       document.getElementById('user-display-email').innerText = username;
@@ -553,7 +564,7 @@ HTML_TEMPLATE = """
       if (data.require_pin) {
         showAuthScreen('verify-screen');
       } else {
-        showToast(data.error || "Login failed");
+        showToast(data.error || "Invalid email or password");
       }
     }
 
@@ -575,6 +586,9 @@ HTML_TEMPLATE = """
 
     async function handleLogout() {
       await fetch('/api/logout', { method: 'POST' });
+      // Clear persistent browser credentials on explicit logout
+      localStorage.removeItem('foodies_user_email');
+      localStorage.removeItem('foodies_user_username');
       cart = [];
       document.getElementById('nav-rider-btn').classList.add('hidden');
       document.getElementById('menu-wrapper').classList.add('hidden');
@@ -621,7 +635,6 @@ HTML_TEMPLATE = """
 
     function addToCart(id) {
       const item = foodItems.find(f => f.id === id);
-      // Push a unique cart entry ID to easily delete specific items even if they have the same name/id
       cart.push({ ...item, cartInstanceId: Date.now() + Math.random() });
       updateCartUI();
       showToast(`${item.name} added to cart`);
@@ -632,7 +645,7 @@ HTML_TEMPLATE = """
       if (index !== -1) {
         const removedItem = cart[index];
         cart.splice(index, 1);
-        openCartModal(); // Refresh cart modal view
+        openCartModal();
         updateCartUI();
         showToast(`Removed ${removedItem.name} from cart`);
       }
@@ -781,8 +794,6 @@ def signup():
 
     if not email or not password or not pin:
         return jsonify({"success": False, "error": "All fields are required"}), 400
-    if get_user(email):
-        return jsonify({"success": False, "error": "User already exists"}), 400
 
     save_user(email, password, pin)
     session['user'] = email
@@ -822,7 +833,6 @@ def logout():
 
 @app.route('/api/rider-location', methods=['GET'])
 def get_rider_location():
-    """Simulates real-time rider progression on each poll."""
     if rider_status['lat'] < rider_status['dest_lat']:
         rider_status['lat'] += 0.0003
         rider_status['lng'] -= 0.0015
@@ -833,7 +843,6 @@ def get_rider_location():
 
 @app.route('/api/active-visitors', methods=['GET'])
 def get_active_visitors():
-    """Returns total online users in the last 2 minutes."""
     now = time.time()
     online = [ip for ip, last_seen in active_visitors.items() if now - last_seen < 120]
     return jsonify({"online_users": len(online)})
