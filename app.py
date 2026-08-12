@@ -45,7 +45,8 @@ def _ensure_orders_schema(conn):
 
     cursor.execute("PRAGMA table_info(orders)")
     existing_columns = {row[1] for row in cursor.fetchall()}
-    required_columns = {"order_id", "email", "items", "total", "status", "address", "created_at", "restaurant"}
+    required_columns = {"order_id", "email", "items", "total", "status", "address", "created_at", "restaurant",
+                         "subtotal", "discount", "promo_code"}
 
     if required_columns.issubset(existing_columns):
         return  # schema is already correct
@@ -68,9 +69,19 @@ def init_db():
                            pin TEXT NOT NULL,
                            is_verified INTEGER DEFAULT 0,
                            phone TEXT DEFAULT '',
-                           address TEXT DEFAULT ''
+                           address TEXT DEFAULT '',
+                           points INTEGER DEFAULT 0
                        )
                        ''')
+        # Migrate existing users table to include points if missing
+        try:
+            cursor.execute("PRAGMA table_info(users)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "points" not in cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN points INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
         cursor.execute('''
                        CREATE TABLE IF NOT EXISTS chat_messages
                        (
@@ -79,6 +90,42 @@ def init_db():
                            sender TEXT,
                            message TEXT,
                            timestamp REAL
+                       )
+                       ''')
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS friends
+                       (
+                           email TEXT NOT NULL,
+                           friend_email TEXT NOT NULL,
+                           created_at REAL,
+                           PRIMARY KEY (email, friend_email)
+                       )
+                       ''')
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS gifts
+                       (
+                           gift_id TEXT PRIMARY KEY,
+                           from_email TEXT,
+                           recipient_name TEXT,
+                           recipient_address TEXT,
+                           message TEXT,
+                           order_id TEXT,
+                           token TEXT UNIQUE,
+                           created_at REAL,
+                           status TEXT DEFAULT 'pending'
+                       )
+                       ''')
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS disputes
+                       (
+                           id INTEGER PRIMARY KEY AUTOINCREMENT,
+                           order_id TEXT,
+                           email TEXT,
+                           reason TEXT,
+                           photo_b64 TEXT,
+                           status TEXT DEFAULT 'open',
+                           credit_points INTEGER DEFAULT 0,
+                           created_at REAL
                        )
                        ''')
         conn.commit()
@@ -97,10 +144,57 @@ def init_db():
                            status TEXT,
                            address TEXT,
                            created_at REAL,
-                           restaurant TEXT DEFAULT ''
+                           restaurant TEXT DEFAULT '',
+                           subtotal REAL DEFAULT 0,
+                           discount REAL DEFAULT 0,
+                           promo_code TEXT DEFAULT ''
+                       )
+                       ''')
+
+        # Favorited menu items per user. cart_item_id encodes "<restaurantId>::<itemId>"
+        # so a favorite always maps back to a specific dish at a specific restaurant.
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS favorites
+                       (
+                           email TEXT NOT NULL,
+                           cart_item_id TEXT NOT NULL,
+                           name TEXT,
+                           restaurant_id TEXT,
+                           restaurant_name TEXT,
+                           price REAL,
+                           emoji TEXT,
+                           created_at REAL,
+                           PRIMARY KEY (email, cart_item_id)
+                       )
+                       ''')
+
+        # Promo codes redeemable at checkout. discount_type is 'percent' or 'fixed'.
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS promo_codes
+                       (
+                           code TEXT PRIMARY KEY,
+                           discount_type TEXT NOT NULL,
+                           discount_value REAL NOT NULL,
+                           min_order REAL DEFAULT 0,
+                           expires_at REAL,
+                           active INTEGER DEFAULT 1
                        )
                        ''')
         conn.commit()
+
+        # Seed a few starter promo codes if none exist yet.
+        cursor.execute("SELECT COUNT(*) FROM promo_codes")
+        if cursor.fetchone()[0] == 0:
+            one_year = time.time() + 60 * 60 * 24 * 365
+            starter_codes = [
+                ("WELCOME10", "percent", 10, 0, one_year, 1),
+                ("FREESHIP", "fixed", 500, 0, one_year, 1),
+                ("SAVE1000", "fixed", 1000, 5000, one_year, 1),
+            ]
+            cursor.executemany(
+                "INSERT INTO promo_codes (code, discount_type, discount_value, min_order, expires_at, active) VALUES (?, ?, ?, ?, ?, ?)",
+                starter_codes)
+            conn.commit()
 
 
 init_db()
@@ -109,7 +203,7 @@ init_db()
 def get_user(email):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT email, password, pin, is_verified, phone, address FROM users WHERE email = ?", (email,))
+        cursor.execute("SELECT email, password, pin, is_verified, phone, address, COALESCE(points, 0) FROM users WHERE email = ?", (email,))
         row = cursor.fetchone()
         if row:
             return {
@@ -118,7 +212,8 @@ def get_user(email):
                 "pin": row[2],
                 "is_verified": row[3],
                 "phone": row[4],
-                "address": row[5]
+                "address": row[5],
+                "points": row[6] if len(row) > 6 else 0
             }
     return None
 
@@ -131,11 +226,21 @@ def save_user(email, password, pin, is_verified=0):
         conn.commit()
 
 
+def add_user_points(email, points):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET points = COALESCE(points, 0) + ? WHERE email = ?", (points, email))
+        conn.commit()
+        cursor.execute("SELECT COALESCE(points, 0) FROM users WHERE email = ?", (email,))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
 def get_order(order_id):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT order_id, email, items, total, status, address, created_at, restaurant FROM orders WHERE order_id = ?",
+            "SELECT order_id, email, items, total, status, address, created_at, restaurant, subtotal, discount, promo_code FROM orders WHERE order_id = ?",
             (order_id,))
         row = cursor.fetchone()
         if not row:
@@ -153,8 +258,75 @@ def get_order(order_id):
             "status": row[4],
             "address": row[5],
             "created_at": row[6],
-            "restaurant": row[7] if len(row) > 7 else ''
+            "restaurant": row[7] if len(row) > 7 else '',
+            "subtotal": row[8] if len(row) > 8 and row[8] is not None else row[3],
+            "discount": row[9] if len(row) > 9 and row[9] is not None else 0,
+            "promo_code": row[10] if len(row) > 10 and row[10] else ''
         }
+
+
+def get_order_history(email, limit=20):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT order_id, items, total, restaurant, created_at, discount, promo_code FROM orders WHERE email = ? ORDER BY created_at DESC LIMIT ?",
+            (email, limit))
+        rows = cursor.fetchall()
+        history = []
+        for row in rows:
+            try:
+                items = json.loads(row[1])
+            except (TypeError, ValueError):
+                items = [{"name": n.strip(), "price": 0} for n in (row[1] or "").split(",") if n.strip()]
+            history.append({
+                "order_id": row[0],
+                "items": items,
+                "total": row[2],
+                "restaurant": row[3] or '',
+                "created_at": row[4],
+                "discount": row[5] or 0,
+                "promo_code": row[6] or ''
+            })
+        return history
+
+
+def get_favorites(email):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT cart_item_id, name, restaurant_id, restaurant_name, price, emoji FROM favorites WHERE email = ? ORDER BY created_at DESC",
+            (email,))
+        rows = cursor.fetchall()
+        return [{
+            "cart_item_id": r[0], "name": r[1], "restaurant_id": r[2],
+            "restaurant_name": r[3], "price": r[4], "emoji": r[5]
+        } for r in rows]
+
+
+def validate_promo_code(code, subtotal):
+    """Looks up a promo code and returns its discount details if it applies to this
+    subtotal, or None if the code doesn't exist / has expired / isn't met yet."""
+    if not code:
+        return None
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT code, discount_type, discount_value, min_order, expires_at, active FROM promo_codes WHERE code = ?",
+            (code.strip().upper(),))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        promo = {
+            "code": row[0], "discount_type": row[1], "discount_value": row[2],
+            "min_order": row[3] or 0, "expires_at": row[4], "active": row[5]
+        }
+        if not promo["active"]:
+            return None
+        if promo["expires_at"] and time.time() > promo["expires_at"]:
+            return None
+        if subtotal < promo["min_order"]:
+            return None
+        return promo
 
 
 def extract_username(email):
@@ -296,30 +468,152 @@ def api_checkout():
     items = data.get('items', [])
     address = (data.get('address') or '').strip()
     restaurant = (data.get('restaurant') or '').strip()
+    promo_code = (data.get('promo_code') or '').strip().upper()
+    is_gift = bool(data.get('is_gift'))
+    recipient_name = (data.get('recipient_name') or '').strip()
+    gift_message = (data.get('gift_message') or '').strip()
+    recipient_address = (data.get('recipient_address') or address).strip()
 
     if not items:
         return jsonify({"success": False, "error": "Your cart is empty"}), 400
-    if not address:
+    if not address and not is_gift:
         return jsonify({"success": False, "error": "Delivery address is required"}), 400
+    if is_gift and not recipient_address:
+        return jsonify({"success": False, "error": "Recipient delivery address is required for gifts"}), 400
+
+    delivery_address = recipient_address if is_gift else address
 
     # Keep only the fields we need, so we never persist unexpected client data.
     clean_items = [{"name": i.get('name', 'Item'), "price": float(i.get('price', 0) or 0)} for i in items]
-    total = sum(i['price'] for i in clean_items)
+    subtotal = sum(i['price'] for i in clean_items)
+
+    # Discounts are always recomputed server-side from the promo_codes table,
+    # never trusted from the client, so a tampered discount can't slip through.
+    discount = 0.0
+    applied_code = ''
+    if promo_code:
+        promo = validate_promo_code(promo_code, subtotal)
+        if promo:
+            if promo["discount_type"] == "percent":
+                discount = round(subtotal * (promo["discount_value"] / 100), 2)
+            else:
+                discount = min(promo["discount_value"], subtotal)
+            applied_code = promo["code"]
+
+    total = max(subtotal - discount, 0)
     order_id = f"ORD-{int(time.time() * 1000)}"
+    gift_token = None
+    gift_id = None
 
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO orders (order_id, email, items, total, status, address, created_at, restaurant) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (order_id, email, json.dumps(clean_items), total, 'Out for Delivery', address, time.time(), restaurant))
+                "INSERT INTO orders (order_id, email, items, total, status, address, created_at, restaurant, subtotal, discount, promo_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (order_id, email, json.dumps(clean_items), total, 'Out for Delivery', delivery_address, time.time(), restaurant,
+                 subtotal, discount, applied_code))
+            if is_gift:
+                gift_id = f"GIFT-{int(time.time() * 1000)}"
+                gift_token = serializer.dumps({"order_id": order_id, "gift_id": gift_id}, salt='gift-track-salt')
+                cursor.execute(
+                    "INSERT INTO gifts (gift_id, from_email, recipient_name, recipient_address, message, order_id, token, created_at, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (gift_id, email, recipient_name, recipient_address, gift_message, order_id, gift_token, time.time(), 'in_transit'))
             conn.commit()
     except Exception as e:
         return jsonify({"success": False, "error": f"Could not save order: {e}"}), 500
 
+    # Award 50 loyalty points for every successful order
+    new_points = add_user_points(email, 50)
+
     # Session only needs to remember *which* order was last placed.
     session['last_order_id'] = order_id
-    return jsonify({"success": True, "order_id": order_id, "total": total})
+    result = {
+        "success": True,
+        "order_id": order_id,
+        "total": total,
+        "subtotal": subtotal,
+        "discount": discount,
+        "points_awarded": 50,
+        "total_points": new_points
+    }
+    if is_gift and gift_token:
+        result["gift_id"] = gift_id
+        result["gift_token"] = gift_token
+        result["share_link"] = f"/gift/{gift_token}"
+    return jsonify(result)
+
+
+@app.route('/api/validate-promo', methods=['POST'])
+def api_validate_promo():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    code = (data.get('code') or '').strip().upper()
+    subtotal = float(data.get('subtotal', 0) or 0)
+
+    if not code:
+        return jsonify({"success": False, "error": "Enter a promo code"}), 400
+
+    promo = validate_promo_code(code, subtotal)
+    if not promo:
+        return jsonify({"success": False, "error": "That code is invalid, expired, or doesn't meet the minimum order for it"}), 404
+
+    return jsonify({
+        "success": True,
+        "code": promo["code"],
+        "discount_type": promo["discount_type"],
+        "discount_value": promo["discount_value"]
+    })
+
+
+@app.route('/api/orders/history', methods=['GET'])
+def api_order_history():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    return jsonify({"success": True, "orders": get_order_history(email)})
+
+
+@app.route('/api/favorites', methods=['GET'])
+def api_get_favorites():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": True, "favorites": []})
+    return jsonify({"success": True, "favorites": get_favorites(email)})
+
+
+@app.route('/api/favorites/toggle', methods=['POST'])
+def api_toggle_favorite():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    cart_item_id = (data.get('cart_item_id') or '').strip()
+    if not cart_item_id:
+        return jsonify({"success": False, "error": "Missing item"}), 400
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM favorites WHERE email = ? AND cart_item_id = ?", (email, cart_item_id))
+        exists = cursor.fetchone()
+
+        if exists:
+            cursor.execute("DELETE FROM favorites WHERE email = ? AND cart_item_id = ?", (email, cart_item_id))
+            conn.commit()
+            return jsonify({"success": True, "favorited": False})
+
+        cursor.execute(
+            "INSERT INTO favorites (email, cart_item_id, name, restaurant_id, restaurant_name, price, emoji, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, cart_item_id, data.get('name', ''), data.get('restaurant_id', ''), data.get('restaurant_name', ''),
+             float(data.get('price', 0) or 0), data.get('emoji', ''), time.time()))
+        conn.commit()
+        return jsonify({"success": True, "favorited": True})
 
 
 @app.route('/api/download-receipt', methods=['GET'])
@@ -357,8 +651,10 @@ def download_receipt():
 
         created = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(order['created_at']))
         restaurant_line = f"<b>Restaurant:</b> {order['restaurant']}<br/>" if order.get('restaurant') else ""
+        promo_line = f"<b>Promo Applied:</b> {order['promo_code']}<br/>" if order.get('promo_code') else ""
         meta_text = (f"<b>Order ID:</b> {order['order_id']}<br/>"
                      f"{restaurant_line}"
+                     f"{promo_line}"
                      f"<b>Customer:</b> {order['email']}<br/>"
                      f"<b>Delivery Address:</b> {order['address']}<br/>"
                      f"<b>Date:</b> {created}")
@@ -368,6 +664,9 @@ def download_receipt():
         table_data = [["Item Description", "Price (\u20a6)"]]
         for item in order['items']:
             table_data.append([item.get('name', 'Meal'), f"\u20a6{item.get('price', 0):,.0f}"])
+        if order.get('discount', 0):
+            table_data.append(["Subtotal", f"\u20a6{order.get('subtotal', order['total']):,.0f}"])
+            table_data.append(["Discount", f"-\u20a6{order['discount']:,.0f}"])
         table_data.append(["Total Amount Paid", f"\u20a6{order['total']:,.0f}"])
 
         t = Table(table_data, colWidths=[350, 150])
@@ -448,6 +747,155 @@ def rider_chat():
     return jsonify({"reply": reply})
 
 
+@app.route('/api/points', methods=['GET'])
+def api_get_points():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    user = get_user(email)
+    return jsonify({"success": True, "points": user.get("points", 0) if user else 0})
+
+
+@app.route('/api/friends', methods=['GET'])
+def api_get_friends():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT friend_email, created_at FROM friends WHERE email = ? ORDER BY created_at DESC", (email,))
+        friends = [{"email": r[0], "username": extract_username(r[0]), "since": r[1]} for r in cursor.fetchall()]
+    return jsonify({"success": True, "friends": friends})
+
+
+@app.route('/api/friends/add', methods=['POST'])
+def api_add_friend():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    friend_email = (data.get('friend_email') or '').strip().lower()
+    if not friend_email or friend_email == email:
+        return jsonify({"success": False, "error": "Enter a valid friend email"}), 400
+    if not get_user(friend_email):
+        return jsonify({"success": False, "error": "That user is not registered on Foodies yet"}), 404
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO friends (email, friend_email, created_at) VALUES (?, ?, ?)",
+                       (email, friend_email, time.time()))
+        conn.commit()
+    return jsonify({"success": True, "message": f"Added {extract_username(friend_email)} as a friend"})
+
+
+@app.route('/api/friends/picks', methods=['GET'])
+def api_friends_picks():
+    """Return favorite dishes from friends — social 'Picks' discovery layer."""
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT friend_email FROM friends WHERE email = ?", (email,))
+        friend_emails = [r[0] for r in cursor.fetchall()]
+        picks = []
+        for fe in friend_emails:
+            cursor.execute(
+                "SELECT cart_item_id, name, restaurant_id, restaurant_name, price, emoji FROM favorites WHERE email = ? ORDER BY created_at DESC LIMIT 5",
+                (fe,))
+            for r in cursor.fetchall():
+                picks.append({
+                    "friend_email": fe,
+                    "friend_username": extract_username(fe),
+                    "cart_item_id": r[0], "name": r[1], "restaurant_id": r[2],
+                    "restaurant_name": r[3], "price": r[4], "emoji": r[5]
+                })
+    return jsonify({"success": True, "picks": picks})
+
+
+@app.route('/api/gift/<token>', methods=['GET'])
+def api_gift_track(token):
+    """Public shareable gift tracking link — no login required."""
+    try:
+        payload = serializer.loads(token, salt='gift-track-salt', max_age=60 * 60 * 24 * 7)
+    except Exception:
+        return jsonify({"success": False, "error": "Invalid or expired gift link"}), 400
+    order_id = payload.get("order_id")
+    gift_id = payload.get("gift_id")
+    order = get_order(order_id) if order_id else None
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT recipient_name, recipient_address, message, status, from_email FROM gifts WHERE gift_id = ?", (gift_id,))
+        row = cursor.fetchone()
+    if not row or not order:
+        return jsonify({"success": False, "error": "Gift not found"}), 404
+    return jsonify({
+        "success": True,
+        "gift_id": gift_id,
+        "recipient_name": row[0],
+        "recipient_address": row[1],
+        "message": row[2],
+        "status": row[3],
+        "from_username": extract_username(row[4]),
+        "order_id": order_id,
+        "restaurant": order.get("restaurant", ""),
+        "items": order.get("items", []),
+        "total": order.get("total", 0),
+        "rider_status": rider_status
+    })
+
+
+@app.route('/api/dispute', methods=['POST'])
+def api_create_dispute():
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    order_id = (data.get('order_id') or '').strip()
+    reason = (data.get('reason') or '').strip()
+    photo_b64 = data.get('photo_b64') or ''
+    if not order_id or not reason:
+        return jsonify({"success": False, "error": "Order ID and reason are required"}), 400
+    order = get_order(order_id)
+    if not order or order['email'] != email:
+        return jsonify({"success": False, "error": "Order not found"}), 404
+    # Instant auto-resolution: grant store credit (points) based on reason
+    credit = 100
+    if "missing" in reason.lower() or "wrong" in reason.lower():
+        credit = 150
+    if "cold" in reason.lower() or "late" in reason.lower():
+        credit = 75
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO disputes (order_id, email, reason, photo_b64, status, credit_points, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (order_id, email, reason, photo_b64[:500000] if photo_b64 else '', 'resolved', credit, time.time()))
+        conn.commit()
+    new_points = add_user_points(email, credit)
+    return jsonify({
+        "success": True,
+        "message": f"Dispute resolved instantly. {credit} points credited to your account as store credit.",
+        "credit_points": credit,
+        "total_points": new_points
+    })
+
+
+@app.route('/api/rider-call', methods=['POST'])
+def api_rider_call():
+    """Simulate secure masked web-telephony connection to the delivery dispatcher."""
+    email = session.get('user_email')
+    if not email:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    # In production this would provision a masked number via Twilio/etc.
+    # Here we return a simulated session that the frontend can present.
+    return jsonify({
+        "success": True,
+        "masked_number": "+234 (0) 800-FOOD-RID",
+        "session_id": f"CALL-{int(time.time())}",
+        "status": "connecting",
+        "message": "Connecting you to the rider via a secure masked line. Your personal number stays private."
+    })
+
+
 # ---------------------------------------------------------
 # ADMIN DASHBOARD ENDPOINTS
 # ---------------------------------------------------------
@@ -473,6 +921,44 @@ def admin_stats():
         "users_count": users_count,
         "active_visitors": len(active_visitors)
     })
+
+
+@app.route('/gift/<token>')
+def gift_page(token):
+    """Public gift tracking page — works without login."""
+    try:
+        payload = serializer.loads(token, salt='gift-track-salt', max_age=60 * 60 * 24 * 7)
+    except Exception:
+        return "<h2>Invalid or expired gift link</h2>", 400
+    order_id = payload.get("order_id")
+    gift_id = payload.get("gift_id")
+    order = get_order(order_id) if order_id else None
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT recipient_name, recipient_address, message, status, from_email FROM gifts WHERE gift_id = ?",
+            (gift_id,))
+        row = cursor.fetchone()
+    if not row or not order:
+        return "<h2>Gift not found</h2>", 404
+    items_html = "".join(
+        f"<li>{i.get('name', 'Item')} — ₦{i.get('price', 0):,.0f}</li>" for i in order.get("items", []))
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Gift from Foodies</title>
+    <style>body{{font-family:system-ui;background:linear-gradient(180deg,#38bdf8,#e0f2fe);min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:20px}}
+    .card{{background:rgba(255,255,255,.9);border-radius:20px;padding:28px;max-width:420px;width:100%;box-shadow:0 20px 40px rgba(0,0,0,.1)}}
+    h1{{color:#ff4757;margin:0 0 8px}} .msg{{background:#f1f5f9;border-radius:12px;padding:12px;margin:12px 0;font-style:italic}}
+    ul{{padding-left:18px}} .status{{color:#10b981;font-weight:700}}</style></head>
+    <body><div class="card">
+    <h1>🎁 A gift for {row[0] or 'you'}!</h1>
+    <p>From <b>{extract_username(row[4])}</b> via Foodies.</p>
+    <div class="msg">"{row[2] or 'Enjoy your meal!'}"</div>
+    <p class="status">● {row[3] or 'In transit'}</p>
+    <p><b>Delivering to:</b> {row[1]}</p>
+    <p><b>Restaurant:</b> {order.get('restaurant') or '—'}</p>
+    <p><b>Items:</b></p><ul>{items_html}</ul>
+    <p style="font-size:12px;color:#64748b">Order {order_id} · Tracked live on Foodies</p>
+    </div></body></html>"""
 
 
 @app.route('/')
@@ -584,6 +1070,13 @@ HTML_TEMPLATE = """
     .btn-primary:hover { opacity: 0.95; transform: translateY(-1px); }
     .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
+    .btn-secondary-sm {
+      padding: 8px 12px; font-weight: 700; font-size: 11px; background: rgba(0,0,0,0.05);
+      color: var(--text-main); border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+      white-space: nowrap; transition: all 0.2s;
+    }
+    .btn-secondary-sm:hover { background: rgba(255, 71, 87, 0.1); border-color: var(--primary); }
+
     .receipt-box { text-align: left; }
     .receipt-check {
       width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, #10b981, #059669);
@@ -630,6 +1123,7 @@ HTML_TEMPLATE = """
     .btn-cart-count { background: white; color: var(--primary); padding: 2px 7px; border-radius: 20px; font-size: 11px; }
     .btn-rider { background: #10b981; color: white; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2); }
     .btn-profile { background: #3b82f6; color: white; }
+    .btn-favorites { background: #ec4899; color: white; box-shadow: 0 4px 12px rgba(236, 72, 153, 0.2); }
     .btn-admin { background: #8b5cf6; color: white; }
     .btn-logout { background: #e2e8f0; color: #475569; }
     .btn-theme { background: transparent; border: 1px solid var(--border); font-size: 16px; cursor: pointer; padding: 6px 10px; border-radius: 10px; }
@@ -692,7 +1186,8 @@ HTML_TEMPLATE = """
     .food-card { 
       background: var(--card-bg); backdrop-filter: blur(12px); border-radius: 20px; 
       border: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; 
-      justify-content: space-between; transition: transform 0.2s, box-shadow 0.2s; box-shadow: var(--glass-shadow); 
+      justify-content: space-between; transition: transform 0.2s, box-shadow 0.2s; box-shadow: var(--glass-shadow);
+      position: relative;
     }
 
     .food-card:hover { transform: translateY(-4px); }
@@ -700,7 +1195,16 @@ HTML_TEMPLATE = """
     .food-img-frame { 
       width: 100%; height: 120px; border-radius: 14px; overflow: hidden; margin-bottom: 12px; 
       background: rgba(0,0,0,0.03); display: flex; align-items: center; justify-content: center; font-size: 52px;
+      position: relative;
     }
+
+    .favorite-heart {
+      position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 50%;
+      background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center;
+      font-size: 15px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.15); transition: transform 0.15s;
+      border: none;
+    }
+    .favorite-heart:hover { transform: scale(1.12); }
 
     .food-title { font-size: 15px; font-weight: 700; color: var(--text-main); }
     .food-desc { font-size: 11px; color: var(--text-muted); margin-top: 4px; height: 32px; overflow: hidden; line-height: 1.4; }
@@ -722,7 +1226,7 @@ HTML_TEMPLATE = """
       display: flex; justify-content: center; align-items: center; z-index: 100; padding: 20px; 
     }
 
-    .modal-box { background: var(--card-bg); backdrop-filter: blur(20px); border-radius: 24px; padding: 28px; width: 100%; max-width: 440px; box-shadow: 0 25px 50px rgba(0,0,0,0.3); border: 1px solid var(--border); color: var(--text-main); }
+    .modal-box { background: var(--card-bg); backdrop-filter: blur(20px); border-radius: 24px; padding: 28px; width: 100%; max-width: 440px; box-shadow: 0 25px 50px rgba(0,0,0,0.3); border: 1px solid var(--border); color: var(--text-main); max-height: 88vh; overflow-y: auto; }
 
     .milestone-container { display: flex; justify-content: space-between; margin: 20px 0; position: relative; }
     .milestone-step { display: flex; flex-direction: column; align-items: center; font-size: 10px; font-weight: 700; color: var(--text-muted); z-index: 2; width: 25%; text-align: center; }
@@ -748,6 +1252,88 @@ HTML_TEMPLATE = """
     .toast-item.error { border-left-color: var(--primary); }
     .toast-item.warning { border-left-color: #f59e0b; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* --- Promo code box --- */
+    .promo-row { display: flex; gap: 8px; margin-bottom: 4px; }
+    .promo-row input { flex: 1; }
+    .promo-applied {
+      display: none; align-items: center; justify-content: space-between; font-size: 11px; font-weight: 700;
+      background: rgba(16, 185, 129, 0.12); color: #059669; border: 1px solid rgba(16,185,129,0.3);
+      border-radius: 10px; padding: 8px 12px; margin-top: 6px;
+    }
+    .promo-applied.show { display: flex; }
+    .promo-remove { cursor: pointer; color: var(--primary); font-weight: 800; }
+    .cart-summary-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+    .cart-summary-row.discount { color: #059669; font-weight: 700; }
+
+    /* --- Modifier modal --- */
+    .modifier-group { margin-bottom: 16px; }
+    .modifier-group-title { font-size: 12px; font-weight: 800; color: var(--text-main); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .modifier-option {
+      display: flex; align-items: center; justify-content: space-between; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: 12px; margin-bottom: 6px; cursor: pointer;
+      background: rgba(0,0,0,0.02); font-size: 12px; font-weight: 600;
+    }
+    .modifier-option.selected { border-color: var(--primary); background: rgba(255, 71, 87, 0.08); }
+    .modifier-option-price { color: var(--text-muted); font-weight: 700; }
+    .modifier-total-row {
+      display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: 800;
+      border-top: 1px solid var(--border); padding-top: 14px; margin: 14px 0;
+    }
+
+    /* --- Favorites modal --- */
+    .fav-item {
+      display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border);
+      border-radius: 14px; margin-bottom: 8px; background: rgba(0,0,0,0.02);
+    }
+    .fav-item-emoji { font-size: 24px; }
+    .fav-item-info { flex: 1; }
+    .fav-item-name { font-size: 12px; font-weight: 700; }
+    .fav-item-restaurant { font-size: 10px; color: var(--text-muted); font-weight: 600; }
+    .fav-item-price { font-size: 12px; font-weight: 800; color: var(--primary); margin-right: 4px; }
+
+    /* --- Order history --- */
+    .order-history-item {
+      border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin-bottom: 10px;
+      background: rgba(0,0,0,0.02);
+    }
+    .order-history-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .order-history-id { font-size: 11px; font-weight: 800; }
+    .order-history-date { font-size: 10px; color: var(--text-muted); }
+    .order-history-items { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; line-height: 1.5; }
+    .order-history-bottom { display: flex; justify-content: space-between; align-items: center; }
+    .order-history-total { font-weight: 800; color: var(--primary); font-size: 12px; }
+
+    .restaurant-closed { opacity: 0.72; }
+    .restaurant-closed:hover { transform: none; }
+
+    /* Live Activity / Dynamic Island approximation */
+    #live-activity-bar {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      z-index: 250; background: #0f172a; color: #f8fafc; border-radius: 40px;
+      padding: 10px 20px; display: none; align-items: center; gap: 12px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.35); font-size: 12px; font-weight: 600;
+      max-width: 92vw; cursor: pointer; border: 1px solid rgba(255,255,255,0.12);
+    }
+    #live-activity-bar.show { display: flex; }
+    #live-activity-bar .la-emoji { font-size: 18px; }
+    #live-activity-bar .la-progress {
+      width: 80px; height: 4px; background: rgba(255,255,255,0.2); border-radius: 4px; overflow: hidden;
+    }
+    #live-activity-bar .la-progress-fill {
+      height: 100%; background: #10b981; width: 60%; transition: width 0.5s;
+    }
+    .points-badge {
+      background: linear-gradient(135deg, #f59e0b, #d97706); color: white;
+      padding: 6px 12px; border-radius: 10px; font-size: 12px; font-weight: 700;
+    }
+    .gift-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+    .gift-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; margin-bottom: 10px; cursor: pointer; }
+    .picks-item {
+      display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border);
+      border-radius: 14px; margin-bottom: 8px; background: rgba(0,0,0,0.02);
+    }
+    .dispute-photo-preview { max-width: 100%; max-height: 120px; border-radius: 10px; margin-top: 8px; display: none; }
   </style>
 </head>
 <body>
@@ -761,6 +1347,16 @@ HTML_TEMPLATE = """
   </div>
 
   <div id="toast-container"></div>
+
+  <!-- Simulated Dynamic Island / Lock-screen Live Activity -->
+  <div id="live-activity-bar" onclick="toggleRiderChatModal()">
+    <span class="la-emoji">🛵</span>
+    <div>
+      <div id="la-status-text">Order on the way</div>
+      <div style="font-size:10px;opacity:0.75;" id="la-order-id"></div>
+    </div>
+    <div class="la-progress"><div class="la-progress-fill" id="la-progress-fill"></div></div>
+  </div>
 
   <div id="auth-wrapper" class="auth-container">
     <div id="login-screen" class="auth-card">
@@ -826,8 +1422,10 @@ HTML_TEMPLATE = """
       <div class="nav-actions">
         <button class="btn-theme" onclick="toggleDarkMode()" title="Toggle Dark/Light Mode">🌓</button>
         <span id="live-visitors" class="user-badge" style="background:#dcfce7; color:#166534;">● Online: 1</span>
+        <span id="points-badge" class="points-badge" title="Loyalty points">⭐ 0 pts</span>
         <span id="user-display-email" class="user-badge"></span>
         <button id="nav-rider-btn" class="btn-nav-action btn-rider hidden" onclick="toggleRiderChatModal()">🛵 Track Rider</button>
+        <button class="btn-nav-action btn-favorites" onclick="openFavoritesModal()">❤️ Favorites</button>
         <button class="btn-nav-action btn-profile" onclick="openProfileModal()">👤 Profile</button>
         <button id="nav-admin-btn" class="btn-nav-action btn-admin hidden" onclick="openAdminModal()">⚙️ Admin</button>
         <button class="btn-nav-action btn-cart" onclick="openCartModal()">🛒 Cart <span id="cart-count-badge" class="btn-cart-count">0</span></button>
@@ -868,15 +1466,81 @@ HTML_TEMPLATE = """
       </div>
       <div id="cart-restaurant-name" style="font-size: 12px; color: var(--text-muted); font-weight: 600; margin-bottom: 12px;"></div>
       <div id="cart-items-container" style="max-height: 200px; overflow-y: auto; margin-bottom: 16px; padding-right: 4px;"></div>
-      <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 16px; margin-bottom: 16px; border-top: 1px solid var(--border); padding-top: 12px;">
-        <span>Total:</span>
-        <span id="cart-total-price" style="color: var(--primary);">₦0</span>
+
+      <div class="form-group">
+        <label>Promo Code</label>
+        <div class="promo-row">
+          <input type="text" id="promo-code-input" placeholder="e.g. WELCOME10" style="text-transform: uppercase;">
+          <button class="btn-secondary-sm" onclick="applyPromoCode()">Apply</button>
+        </div>
+        <div id="promo-applied-box" class="promo-applied">
+          <span id="promo-applied-text"></span>
+          <span class="promo-remove" onclick="removePromoCode()">✕</span>
+        </div>
       </div>
+
+      <div style="margin: 14px 0 6px; border-top: 1px solid var(--border); padding-top: 12px;">
+        <div class="cart-summary-row"><span>Subtotal</span><span id="cart-subtotal-price">₦0</span></div>
+        <div class="cart-summary-row discount hidden" id="cart-discount-row"><span>Discount</span><span id="cart-discount-price">-₦0</span></div>
+        <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 16px; margin-top: 6px;">
+          <span>Total:</span>
+          <span id="cart-total-price" style="color: var(--primary);">₦0</span>
+        </div>
+      </div>
+
       <div class="form-group">
         <label>Delivery Address</label>
         <input type="text" id="delivery-address" placeholder="e.g. Sauka new site gate, House 5">
       </div>
+
+      <div class="gift-section">
+        <label class="gift-toggle">
+          <input type="checkbox" id="gift-toggle" onchange="toggleGiftFields()"> 🎁 Send as a Gift
+        </label>
+        <div id="gift-fields" class="hidden">
+          <div class="form-group">
+            <label>Recipient Name</label>
+            <input type="text" id="gift-recipient-name" placeholder="Friend's name">
+          </div>
+          <div class="form-group">
+            <label>Recipient Delivery Address</label>
+            <input type="text" id="gift-recipient-address" placeholder="Where should we deliver the gift?">
+          </div>
+          <div class="form-group">
+            <label>Personal Message</label>
+            <textarea id="gift-message" rows="2" placeholder="Happy birthday! Enjoy this meal on me ❤️"></textarea>
+          </div>
+          <p style="font-size:11px;color:var(--text-muted);">A secure shareable tracking link will be generated after payment so your friend can follow the delivery.</p>
+        </div>
+      </div>
+
       <button class="btn-primary" id="checkout-btn" onclick="payWithPaystack()">Proceed to Checkout & Generate PDF Invoice</button>
+    </div>
+  </div>
+
+  <div id="modifierModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+        <h3 id="modifier-item-name" style="font-size: 18px; font-weight: 800;">Customize Item</h3>
+        <span style="cursor: pointer; font-weight: bold; font-size: 18px;" onclick="closeModifierModal()">✕</span>
+      </div>
+      <div id="modifier-item-desc" style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;"></div>
+      <div id="modifier-groups-container"></div>
+      <div class="modifier-total-row">
+        <span>Item Total</span>
+        <span id="modifier-total-price" style="color: var(--primary);">₦0</span>
+      </div>
+      <button class="btn-primary" onclick="confirmAddWithModifiers()">Add to Cart</button>
+    </div>
+  </div>
+
+  <div id="favoritesModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 style="font-size: 18px; font-weight: 800;">Your Favorites</h3>
+        <span style="cursor: pointer; font-weight: bold; font-size: 18px;" onclick="closeFavoritesModal()">✕</span>
+      </div>
+      <div id="favorites-container"></div>
     </div>
   </div>
 
@@ -895,6 +1559,48 @@ HTML_TEMPLATE = """
         <textarea id="profile-address" rows="3" placeholder="Enter full delivery address"></textarea>
       </div>
       <button class="btn-primary" onclick="saveUserProfile()">Save Profile Details</button>
+
+      <div class="cs-section">
+        <h4>⭐ Loyalty Points</h4>
+        <p id="profile-points-text">You have <b>0</b> points. Earn 50 points on every order!</p>
+      </div>
+
+      <div class="cs-section">
+        <h4>Order History</h4>
+        <p>Your recent orders — reorder any of them in one tap.</p>
+        <div id="order-history-container"></div>
+      </div>
+
+      <div class="cs-section">
+        <h4>👥 Friends & Social Picks</h4>
+        <p>See what your friends love and discover new spots.</p>
+        <div class="form-group" style="display:flex;gap:8px;">
+          <input type="email" id="friend-email-input" placeholder="friend@example.com" style="flex:1;">
+          <button class="btn-secondary-sm" onclick="addFriend()">Add Friend</button>
+        </div>
+        <div id="friends-list" style="margin-bottom:12px;"></div>
+        <h4 style="font-size:13px;margin-bottom:6px;">Friends' Picks</h4>
+        <div id="friends-picks-container"></div>
+      </div>
+
+      <div class="cs-section">
+        <h4>⚡ Instant Dispute Center</h4>
+        <p>Missing item or wrong order? Upload a photo for instant store credit.</p>
+        <div class="form-group">
+          <label>Order ID</label>
+          <input type="text" id="dispute-order-id" placeholder="ORD-...">
+        </div>
+        <div class="form-group">
+          <label>What went wrong?</label>
+          <input type="text" id="dispute-reason" placeholder="e.g. Missing fries / Wrong item / Food was cold">
+        </div>
+        <div class="form-group">
+          <label>Photo evidence (optional)</label>
+          <input type="file" id="dispute-photo" accept="image/*" onchange="previewDisputePhoto(event)">
+          <img id="dispute-photo-preview" class="dispute-photo-preview" alt="Preview">
+        </div>
+        <button class="btn-primary" onclick="submitDispute()">Submit Claim — Instant Credit</button>
+      </div>
 
       <div class="cs-section">
         <h4>Customer Service</h4>
@@ -952,6 +1658,10 @@ HTML_TEMPLATE = """
       <div class="chat-body" id="chatMessages"></div>
       <div id="typingIndicator" style="font-size: 11px; color: var(--text-muted); padding: 4px 20px;" class="hidden">Rider is typing...</div>
 
+      <div style="padding: 8px 18px; border-top: 1px solid var(--border);">
+        <button class="btn-primary" style="background: linear-gradient(135deg,#3b82f6,#2563eb); margin-bottom: 0;" onclick="startRiderCall()">📞 Call Rider (Masked Line)</button>
+        <div id="rider-call-status" style="font-size:11px;color:var(--text-muted);margin-top:6px;display:none;"></div>
+      </div>
       <div class="chat-input-area">
         <input type="text" id="chatInput" placeholder="Type message..." onkeypress="handleChatKeyPress(event)">
         <button class="btn-primary" style="width: auto; padding: 0 18px;" onclick="sendChatMessage()">Send</button>
@@ -977,6 +1687,10 @@ HTML_TEMPLATE = """
           <span id="receipt-restaurant" style="font-weight:700;"></span>
         </div>
         <div id="receipt-items-list" style="font-size:12px; margin: 8px 0; display:flex; flex-direction:column; gap:4px;"></div>
+        <div id="receipt-discount-line" style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:8px; color:#059669; font-weight:700;" class="hidden">
+          <span>Discount</span>
+          <span id="receipt-discount"></span>
+        </div>
         <div style="display:flex; justify-content:space-between; font-size:14px; font-weight:800; border-top: 1px solid var(--border); padding-top:8px; margin-top:8px;">
           <span>Total Paid</span>
           <span id="receipt-total" style="color: var(--primary);"></span>
@@ -997,9 +1711,38 @@ HTML_TEMPLATE = """
     let cart = [];
     let map, riderMarker;
     let pollRiderInterval;
+    let favoriteIds = new Set();
+    let appliedPromo = null; // { code, discount_type, discount_value, discount_amount }
+    let pendingModifierItem = null;
+    let selectedModifiers = {}; // groupName -> {label, price} for single, or Set-backed array for multi
 
     const PAYSTACK_PUBLIC_KEY = "pk_test_15c3892f5824f99266724433804c708899e1994f";
     const categories = ["Pizza", "Burgers", "Local", "Sides", "Drinks", "Desserts"];
+
+    // Modifier groups per menu category: size/portion is single-select, extras are multi-select.
+    const modifierGroups = {
+      Pizza: [
+        { name: "Size", type: "single", options: [{ label: "Regular", price: 0 }, { label: "Large", price: 400 }] },
+        { name: "Toppings", type: "multi", options: [{ label: "Extra Cheese", price: 150 }, { label: "Mushrooms", price: 100 }, { label: "Extra Pepperoni", price: 200 }, { label: "Olives", price: 100 }] }
+      ],
+      Burgers: [
+        { name: "Patty", type: "single", options: [{ label: "Single", price: 0 }, { label: "Double", price: 500 }] },
+        { name: "Extras", type: "multi", options: [{ label: "Extra Cheese", price: 150 }, { label: "Bacon", price: 200 }, { label: "Avocado", price: 250 }] }
+      ],
+      Local: [
+        { name: "Portion", type: "single", options: [{ label: "Regular", price: 0 }, { label: "Large", price: 400 }] },
+        { name: "Extras", type: "multi", options: [{ label: "Extra Protein", price: 300 }, { label: "Extra Spicy", price: 0 }] }
+      ],
+      Sides: [
+        { name: "Size", type: "single", options: [{ label: "Regular", price: 0 }, { label: "Large", price: 200 }] }
+      ],
+      Drinks: [
+        { name: "Size", type: "single", options: [{ label: "Regular", price: 0 }, { label: "Large", price: 150 }] }
+      ],
+      Desserts: [
+        { name: "Extras", type: "multi", options: [{ label: "Extra Scoop", price: 200 }, { label: "Whipped Cream", price: 100 }] }
+      ]
+    };
 
     const specificEmojis = {
       "Pepperoni Special": "🍕", "Margherita Special": "🍕", "BBQ Chicken Special": "🍕", "Four Cheese Special": "🧀",
@@ -1034,28 +1777,43 @@ HTML_TEMPLATE = """
     // 20 restaurants, each specialising in a couple of categories from the master
     // catalog. Prices differ per restaurant via a price multiplier, so the same
     // dish costs a different amount depending on where you order it from.
+    // openHour / closeHour are 24h local server-time style (client uses browser clock as proxy)
     const restaurantDefs = [
-      { name: "Pizza Palace",         cuisine: "Pizza",           categories: ["Pizza", "Sides", "Drinks"],     multiplier: 1.05, logo: "🍕" },
-      { name: "Burger Barn",          cuisine: "Burgers",         categories: ["Burgers", "Sides", "Drinks"],   multiplier: 0.95, logo: "🍔" },
-      { name: "Mama's Kitchen",       cuisine: "Local Dishes",    categories: ["Local", "Sides", "Drinks"],     multiplier: 1.00, logo: "🍛" },
-      { name: "Cheesy Slice Co.",     cuisine: "Pizza",           categories: ["Pizza", "Desserts", "Drinks"],  multiplier: 1.15, logo: "🍕" },
-      { name: "Grill Masters",        cuisine: "Burgers & Grill", categories: ["Burgers", "Local", "Drinks"],   multiplier: 1.10, logo: "🍔" },
-      { name: "Naija Delight",        cuisine: "Local Dishes",    categories: ["Local", "Sides", "Desserts"],   multiplier: 0.90, logo: "🍲" },
-      { name: "Crust & Co.",          cuisine: "Pizza",           categories: ["Pizza", "Sides"],               multiplier: 1.20, logo: "🍕" },
-      { name: "Smash House",          cuisine: "Burgers",         categories: ["Burgers", "Desserts", "Drinks"],multiplier: 1.00, logo: "🍔" },
-      { name: "Spice Route",          cuisine: "Local Dishes",    categories: ["Local", "Drinks", "Desserts"],  multiplier: 1.05, logo: "🍛" },
-      { name: "Sweet Tooth Café",     cuisine: "Desserts",        categories: ["Desserts", "Drinks"],           multiplier: 0.95, logo: "🍰" },
-      { name: "The Sizzle Spot",      cuisine: "Burgers & Grill", categories: ["Burgers", "Sides"],              multiplier: 1.25, logo: "🍔" },
-      { name: "Golden Crust Pizzeria",cuisine: "Pizza",           categories: ["Pizza", "Drinks"],               multiplier: 0.90, logo: "🍕" },
-      { name: "Local Flavors",        cuisine: "Local Dishes",    categories: ["Local", "Sides"],                multiplier: 1.00, logo: "🍲" },
-      { name: "Frosty's Drinks & Ice",cuisine: "Drinks & Dessert",categories: ["Drinks", "Desserts"],            multiplier: 0.85, logo: "🥤" },
-      { name: "Fry Zone",             cuisine: "Sides & Snacks",  categories: ["Sides", "Drinks"],               multiplier: 0.80, logo: "🍟" },
-      { name: "Urban Bites",          cuisine: "Pizza & Burgers", categories: ["Burgers", "Pizza"],              multiplier: 1.10, logo: "🍔" },
-      { name: "Taste of Naija",       cuisine: "Local Dishes",    categories: ["Local", "Desserts"],             multiplier: 1.15, logo: "🍛" },
-      { name: "Quick Slice",          cuisine: "Pizza",           categories: ["Pizza", "Sides", "Drinks"],      multiplier: 0.95, logo: "🍕" },
-      { name: "Chop House",           cuisine: "Local & Grill",   categories: ["Local", "Burgers"],              multiplier: 1.00, logo: "🍲" },
-      { name: "Dessert Dreams",       cuisine: "Desserts",        categories: ["Desserts", "Sides"],             multiplier: 1.05, logo: "🍰" }
+      { name: "Pizza Palace",         cuisine: "Pizza",           categories: ["Pizza", "Sides", "Drinks"],     multiplier: 1.05, logo: "🍕", openHour: 8,  closeHour: 23 },
+      { name: "Burger Barn",          cuisine: "Burgers",         categories: ["Burgers", "Sides", "Drinks"],   multiplier: 0.95, logo: "🍔", openHour: 9,  closeHour: 22 },
+      { name: "Mama's Kitchen",       cuisine: "Local Dishes",    categories: ["Local", "Sides", "Drinks"],     multiplier: 1.00, logo: "🍛", openHour: 7,  closeHour: 21 },
+      { name: "Cheesy Slice Co.",     cuisine: "Pizza",           categories: ["Pizza", "Desserts", "Drinks"],  multiplier: 1.15, logo: "🍕", openHour: 10, closeHour: 23 },
+      { name: "Grill Masters",        cuisine: "Burgers & Grill", categories: ["Burgers", "Local", "Drinks"],   multiplier: 1.10, logo: "🍔", openHour: 11, closeHour: 23 },
+      { name: "Naija Delight",        cuisine: "Local Dishes",    categories: ["Local", "Sides", "Desserts"],   multiplier: 0.90, logo: "🍲", openHour: 8,  closeHour: 20 },
+      { name: "Crust & Co.",          cuisine: "Pizza",           categories: ["Pizza", "Sides"],               multiplier: 1.20, logo: "🍕", openHour: 9,  closeHour: 22 },
+      { name: "Smash House",          cuisine: "Burgers",         categories: ["Burgers", "Desserts", "Drinks"],multiplier: 1.00, logo: "🍔", openHour: 10, closeHour: 24 },
+      { name: "Spice Route",          cuisine: "Local Dishes",    categories: ["Local", "Drinks", "Desserts"],  multiplier: 1.05, logo: "🍛", openHour: 8,  closeHour: 21 },
+      { name: "Sweet Tooth Café",     cuisine: "Desserts",        categories: ["Desserts", "Drinks"],           multiplier: 0.95, logo: "🍰", openHour: 12, closeHour: 22 },
+      { name: "The Sizzle Spot",      cuisine: "Burgers & Grill", categories: ["Burgers", "Sides"],              multiplier: 1.25, logo: "🍔", openHour: 11, closeHour: 23 },
+      { name: "Golden Crust Pizzeria",cuisine: "Pizza",           categories: ["Pizza", "Drinks"],               multiplier: 0.90, logo: "🍕", openHour: 9,  closeHour: 22 },
+      { name: "Local Flavors",        cuisine: "Local Dishes",    categories: ["Local", "Sides"],                multiplier: 1.00, logo: "🍲", openHour: 7,  closeHour: 20 },
+      { name: "Frosty's Drinks & Ice",cuisine: "Drinks & Dessert",categories: ["Drinks", "Desserts"],            multiplier: 0.85, logo: "🥤", openHour: 10, closeHour: 23 },
+      { name: "Fry Zone",             cuisine: "Sides & Snacks",  categories: ["Sides", "Drinks"],               multiplier: 0.80, logo: "🍟", openHour: 8,  closeHour: 21 },
+      { name: "Urban Bites",          cuisine: "Pizza & Burgers", categories: ["Burgers", "Pizza"],              multiplier: 1.10, logo: "🍔", openHour: 9,  closeHour: 23 },
+      { name: "Taste of Naija",       cuisine: "Local Dishes",    categories: ["Local", "Desserts"],             multiplier: 1.15, logo: "🍛", openHour: 8,  closeHour: 21 },
+      { name: "Quick Slice",          cuisine: "Pizza",           categories: ["Pizza", "Sides", "Drinks"],      multiplier: 0.95, logo: "🍕", openHour: 10, closeHour: 24 },
+      { name: "Chop House",           cuisine: "Local & Grill",   categories: ["Local", "Burgers"],              multiplier: 1.00, logo: "🍲", openHour: 9,  closeHour: 22 },
+      { name: "Dessert Dreams",       cuisine: "Desserts",        categories: ["Desserts", "Sides"],             multiplier: 1.05, logo: "🍰", openHour: 12, closeHour: 23 }
     ];
+
+    function isRestaurantOpen(def) {
+      const h = new Date().getHours();
+      const open = def.openHour ?? 8;
+      const close = def.closeHour ?? 22;
+      if (close === 24) return h >= open;
+      if (close > open) return h >= open && h < close;
+      return h >= open || h < close;
+    }
+    function formatHour(h) {
+      if (h === 0 || h === 24) return '12:00 AM';
+      if (h === 12) return '12:00 PM';
+      return h > 12 ? `${h - 12}:00 PM` : `${h}:00 AM`;
+    }
 
     const restaurants = restaurantDefs.map((def, idx) => {
       const id = `r${idx + 1}`;
@@ -1068,12 +1826,16 @@ HTML_TEMPLATE = """
           restaurantId: id,
           restaurantName: def.name
         }));
+      const open = isRestaurantOpen(def);
       return {
         id, name: def.name, cuisine: def.cuisine, logo: def.logo,
         rating: (4 + ((idx * 37) % 10) / 10).toFixed(1),
         eta: `${20 + (idx % 4) * 5}-${35 + (idx % 4) * 5} min`,
         categories: def.categories,
-        menu
+        menu,
+        openHour: def.openHour, closeHour: def.closeHour,
+        isOpen: open,
+        closedBadge: open ? null : `Closed — Opens at ${formatHour(def.openHour)}`
       };
     });
 
@@ -1152,57 +1914,96 @@ HTML_TEMPLATE = """
 
       updateCartUI();
       startVisitorMonitoring();
+      loadFavorites();
+      refreshPoints();
+      // Request notification permission for Live Activity style alerts
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
     }
 
     async function handleSignup() {
-      const email = document.getElementById('signup-email').value;
+      const email = document.getElementById('signup-email').value.trim();
       const password = document.getElementById('signup-password').value;
-      const pin = document.getElementById('signup-pin').value;
-
-      const res = await fetch('/api/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, pin })
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast("Account created successfully with email verification!", "success");
-        openMenu(data.email, data.username);
-      } else {
-        showToast(data.error, "error");
+      const pin = document.getElementById('signup-pin').value.trim();
+      if (!email || !password || !pin) {
+        showToast("All fields are required (email, password, 6-digit PIN)", "warning");
+        return;
+      }
+      if (pin.length !== 6 || !/^\d+$/.test(pin)) {
+        showToast("PIN must be exactly 6 digits", "warning");
+        return;
+      }
+      try {
+        const res = await fetch('/api/signup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ email, password, pin })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast("Account created successfully!", "success");
+          openMenu(data.email, data.username);
+        } else {
+          showToast(data.error || "Signup failed", "error");
+        }
+      } catch (e) {
+        console.error(e);
+        showToast("Cannot reach server. Is the app running?", "error");
       }
     }
 
     async function handleLogin() {
-      const email = document.getElementById('login-email').value;
+      const email = document.getElementById('login-email').value.trim();
       const password = document.getElementById('login-password').value;
-
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-      const data = await res.json();
-      if (data.require_pin) {
-        showAuthScreen('verify-screen');
-      } else {
-        showToast(data.error || "Invalid credentials", "error");
+      if (!email || !password) {
+        showToast("Enter email and password", "warning");
+        return;
+      }
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (data.require_pin) {
+          showToast("Enter your security PIN", "info");
+          showAuthScreen('verify-screen');
+        } else {
+          showToast(data.error || "Invalid credentials", "error");
+        }
+      } catch (e) {
+        console.error(e);
+        showToast("Cannot reach server. Is the app running?", "error");
       }
     }
 
     async function handleVerifyPIN() {
-      const pin = document.getElementById('verify-pin').value;
-      const res = await fetch('/api/verify-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin })
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast("PIN verified successfully", "success");
-        openMenu(data.email, data.username);
-      } else {
-        showToast(data.error, "error");
+      const pin = document.getElementById('verify-pin').value.trim();
+      if (!pin) {
+        showToast("Enter your 6-digit PIN", "warning");
+        return;
+      }
+      try {
+        const res = await fetch('/api/verify-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ pin })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast("PIN verified successfully", "success");
+          openMenu(data.email, data.username);
+        } else {
+          showToast(data.error || "Incorrect PIN", "error");
+        }
+      } catch (e) {
+        console.error(e);
+        showToast("Cannot reach server. Is the app running?", "error");
       }
     }
 
@@ -1227,6 +2028,8 @@ HTML_TEMPLATE = """
       localStorage.removeItem('foodies_user_email');
       localStorage.removeItem('foodies_user_username');
       cart = [];
+      favoriteIds = new Set();
+      appliedPromo = null;
       document.getElementById('nav-rider-btn').classList.add('hidden');
       document.getElementById('menu-wrapper').classList.add('hidden');
       document.getElementById('auth-wrapper').classList.remove('hidden');
@@ -1243,14 +2046,24 @@ HTML_TEMPLATE = """
       }
       list.forEach(r => {
         const card = document.createElement('div');
-        card.className = 'restaurant-card';
-        card.onclick = () => openRestaurant(r.id);
+        card.className = 'restaurant-card' + (r.isOpen ? '' : ' restaurant-closed');
+        card.onclick = () => {
+          if (!r.isOpen) {
+            showToast(r.closedBadge || 'This restaurant is currently closed', 'warning');
+            return;
+          }
+          openRestaurant(r.id);
+        };
+        const badge = r.isOpen
+          ? `<span style="font-size:10px;color:#059669;font-weight:700;">● Open</span>`
+          : `<span style="font-size:10px;color:#ef4444;font-weight:700;">${r.closedBadge || 'Closed'}</span>`;
         card.innerHTML = `
           <div class="restaurant-card-top">
-            <div class="restaurant-logo">${r.logo}</div>
+            <div class="restaurant-logo" style="${r.isOpen ? '' : 'opacity:0.5;filter:grayscale(1);'}">${r.logo}</div>
             <div>
               <div class="restaurant-name">${r.name}</div>
               <div class="restaurant-cuisine">${r.cuisine}</div>
+              ${badge}
             </div>
           </div>
           <div class="restaurant-meta">
@@ -1258,7 +2071,7 @@ HTML_TEMPLATE = """
             <span>${r.eta}</span>
             <span>${r.menu.length} items</span>
           </div>
-          <button class="restaurant-view-btn">View Menu</button>
+          <button class="restaurant-view-btn" ${r.isOpen ? '' : 'disabled style="opacity:0.5;cursor:not-allowed;"'}>${r.isOpen ? 'View Menu' : 'Closed'}</button>
         `;
         grid.appendChild(card);
       });
@@ -1319,15 +2132,19 @@ HTML_TEMPLATE = """
       items.forEach(item => {
         const card = document.createElement('div');
         card.className = 'food-card';
+        const isFav = favoriteIds.has(item.cartItemId);
         card.innerHTML = `
           <div>
-            <div class="food-img-frame">${item.emoji}</div>
+            <div class="food-img-frame">
+              ${item.emoji}
+              <button class="favorite-heart" onclick="event.stopPropagation(); toggleFavorite('${item.cartItemId}')">${isFav ? '❤️' : '🤍'}</button>
+            </div>
             <div class="food-title">${item.name}</div>
             <div class="food-desc">${item.desc}</div>
           </div>
           <div class="food-footer">
             <span class="food-price">₦${item.price.toLocaleString()}</span>
-            <button class="btn-add" onclick="addToCart('${item.cartItemId}')">+ Add</button>
+            <button class="btn-add" onclick="openModifierModal('${item.cartItemId}')">+ Add</button>
           </div>
         `;
         grid.appendChild(card);
@@ -1358,9 +2175,136 @@ HTML_TEMPLATE = """
       }
     }
 
-    function addToCart(cartItemId) {
-      const item = currentRestaurant.menu.find(f => f.cartItemId === cartItemId);
+    // ---------------------------------------------------------
+    // MENU ITEM MODIFIERS (sizes / toppings / extras)
+    // ---------------------------------------------------------
+    function findMenuItemByCartId(cartItemId) {
+      if (currentRestaurant) {
+        const found = currentRestaurant.menu.find(f => f.cartItemId === cartItemId);
+        if (found) return found;
+      }
+      const restaurantId = cartItemId.split('::')[0];
+      const restaurant = restaurants.find(r => r.id === restaurantId);
+      return restaurant ? restaurant.menu.find(f => f.cartItemId === cartItemId) : null;
+    }
+
+    function openModifierModal(cartItemId) {
+      const item = findMenuItemByCartId(cartItemId);
       if (!item) return;
+      pendingModifierItem = item;
+      selectedModifiers = {};
+
+      const groups = modifierGroups[item.category] || [];
+      groups.forEach(g => { selectedModifiers[g.name] = g.type === 'single' ? null : []; });
+
+      document.getElementById('modifier-item-name').innerText = item.name;
+      document.getElementById('modifier-item-desc').innerText = item.desc;
+
+      const container = document.getElementById('modifier-groups-container');
+      if (groups.length === 0) {
+        container.innerHTML = `<div style="font-size:12px; color:var(--text-muted); margin-bottom: 10px;">This item comes as-is — no customization needed.</div>`;
+      } else {
+        container.innerHTML = groups.map(g => `
+          <div class="modifier-group">
+            <div class="modifier-group-title">${g.name}${g.type === 'single' ? ' (choose 1)' : ' (optional, pick any)'}</div>
+            <div id="modgroup-${g.name.replace(/\\s+/g, '')}">
+              ${g.options.map((opt, i) => `
+                <div class="modifier-option" data-group="${g.name}" data-index="${i}" onclick="selectModifierOption('${g.name}', ${i}, '${g.type}')">
+                  <span>${opt.label}</span>
+                  <span class="modifier-option-price">${opt.price > 0 ? '+₦' + opt.price.toLocaleString() : 'Free'}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `).join('');
+      }
+
+      // default-select first option of each single-select group
+      groups.forEach(g => {
+        if (g.type === 'single' && g.options.length > 0) {
+          selectModifierOption(g.name, 0, 'single');
+        }
+      });
+
+      updateModifierTotal();
+      document.getElementById('modifierModal').classList.remove('hidden');
+    }
+
+    function selectModifierOption(groupName, index, type) {
+      const group = (modifierGroups[pendingModifierItem.category] || []).find(g => g.name === groupName);
+      if (!group) return;
+      const opt = group.options[index];
+
+      if (type === 'single') {
+        selectedModifiers[groupName] = opt;
+      } else {
+        const list = selectedModifiers[groupName] || [];
+        const existingIdx = list.findIndex(o => o.label === opt.label);
+        if (existingIdx >= 0) {
+          list.splice(existingIdx, 1);
+        } else {
+          list.push(opt);
+        }
+        selectedModifiers[groupName] = list;
+      }
+
+      // refresh visual selection state for this group
+      const groupEl = document.getElementById(`modgroup-${groupName.replace(/\\s+/g, '')}`);
+      if (groupEl) {
+        group.options.forEach((o, i) => {
+          const optEl = groupEl.querySelector(`[data-index="${i}"]`);
+          if (!optEl) return;
+          const isSelected = type === 'single'
+            ? (selectedModifiers[groupName] && selectedModifiers[groupName].label === o.label)
+            : (selectedModifiers[groupName] || []).some(sel => sel.label === o.label);
+          optEl.classList.toggle('selected', !!isSelected);
+        });
+      }
+      updateModifierTotal();
+    }
+
+    function computeModifierPriceDelta() {
+      let delta = 0;
+      Object.values(selectedModifiers).forEach(val => {
+        if (!val) return;
+        if (Array.isArray(val)) {
+          val.forEach(o => { delta += o.price; });
+        } else {
+          delta += val.price;
+        }
+      });
+      return delta;
+    }
+
+    function updateModifierTotal() {
+      if (!pendingModifierItem) return;
+      const total = pendingModifierItem.price + computeModifierPriceDelta();
+      document.getElementById('modifier-total-price').innerText = `₦${total.toLocaleString()}`;
+    }
+
+    function closeModifierModal() {
+      document.getElementById('modifierModal').classList.add('hidden');
+      pendingModifierItem = null;
+    }
+
+    function buildModifierSummary() {
+      const parts = [];
+      Object.entries(selectedModifiers).forEach(([groupName, val]) => {
+        if (!val) return;
+        if (Array.isArray(val)) {
+          val.forEach(o => parts.push(o.label));
+        } else {
+          if (val.price !== 0 || (modifierGroups[pendingModifierItem.category] || []).find(g => g.name === groupName)?.options.length > 1) {
+            parts.push(val.label);
+          }
+        }
+      });
+      return parts;
+    }
+
+    function confirmAddWithModifiers() {
+      if (!pendingModifierItem) return;
+      const item = pendingModifierItem;
 
       if (cart.length > 0 && cart[0].restaurantId !== item.restaurantId) {
         const confirmed = confirm(
@@ -1370,9 +2314,22 @@ HTML_TEMPLATE = """
         cart = [];
       }
 
-      cart.push({ ...item, cartInstanceId: Date.now() + Math.random() });
+      const modifierParts = buildModifierSummary();
+      const delta = computeModifierPriceDelta();
+      const finalPrice = item.price + delta;
+
+      cart.push({
+        ...item,
+        price: finalPrice,
+        basePrice: item.price,
+        modifiers: modifierParts,
+        name: modifierParts.length > 0 ? `${item.name} (${modifierParts.join(', ')})` : item.name,
+        cartInstanceId: Date.now() + Math.random()
+      });
+
       updateCartUI();
       showToast(`${item.name} added to cart`, "success");
+      closeModifierModal();
     }
 
     function removeFromCart(cartInstanceId) {
@@ -1389,17 +2346,86 @@ HTML_TEMPLATE = """
       document.getElementById('cart-count-badge').innerText = cart.length;
     }
 
+    // ---------------------------------------------------------
+    // PROMO CODES & DISCOUNTS
+    // ---------------------------------------------------------
+    function cartSubtotal() {
+      return cart.reduce((sum, item) => sum + item.price, 0);
+    }
+
+    async function applyPromoCode() {
+      const codeInput = document.getElementById('promo-code-input');
+      const code = codeInput.value.trim().toUpperCase();
+      if (!code) {
+        showToast("Enter a promo code first", "warning");
+        return;
+      }
+      const subtotal = cartSubtotal();
+      try {
+        const res = await fetch('/api/validate-promo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, subtotal })
+        });
+        const data = await res.json();
+        if (data.success) {
+          appliedPromo = data;
+          showToast(`Promo "${code}" applied!`, "success");
+          renderCartSummary();
+        } else {
+          appliedPromo = null;
+          showToast(data.error || "Invalid promo code", "error");
+          renderCartSummary();
+        }
+      } catch (e) {
+        showToast("Could not validate promo code right now", "error");
+      }
+    }
+
+    function removePromoCode() {
+      appliedPromo = null;
+      document.getElementById('promo-code-input').value = '';
+      renderCartSummary();
+      showToast("Promo code removed", "info");
+    }
+
+    function renderCartSummary() {
+      const subtotal = cartSubtotal();
+      let discount = 0;
+      const appliedBox = document.getElementById('promo-applied-box');
+      const discountRow = document.getElementById('cart-discount-row');
+
+      if (appliedPromo) {
+        discount = appliedPromo.discount_type === 'percent'
+          ? Math.round(subtotal * (appliedPromo.discount_value / 100))
+          : Math.min(appliedPromo.discount_value, subtotal);
+        appliedBox.classList.add('show');
+        document.getElementById('promo-applied-text').innerText =
+          appliedPromo.discount_type === 'percent'
+            ? `${appliedPromo.code}: ${appliedPromo.discount_value}% off applied`
+            : `${appliedPromo.code}: ₦${appliedPromo.discount_value.toLocaleString()} off applied`;
+        discountRow.classList.remove('hidden');
+      } else {
+        appliedBox.classList.remove('show');
+        discountRow.classList.add('hidden');
+      }
+
+      const total = Math.max(subtotal - discount, 0);
+      document.getElementById('cart-subtotal-price').innerText = `₦${subtotal.toLocaleString()}`;
+      document.getElementById('cart-discount-price').innerText = `-₦${discount.toLocaleString()}`;
+      document.getElementById('cart-total-price').innerText = `₦${total.toLocaleString()}`;
+      return { subtotal, discount, total };
+    }
+
     function openCartModal() {
       const container = document.getElementById('cart-items-container');
       const restaurantLabel = document.getElementById('cart-restaurant-name');
       container.innerHTML = '';
       restaurantLabel.innerText = cart.length > 0 ? `From ${cart[0].restaurantName}` : '';
-      let total = 0;
       if (cart.length === 0) {
         container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding: 20px;">Your cart is empty</div>`;
       } else {
         cart.forEach((item) => {
-          total += item.price;
           container.innerHTML += `
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px;">
               <span>${item.emoji} ${item.name} - ₦${item.price.toLocaleString()}</span>
@@ -1408,12 +2434,104 @@ HTML_TEMPLATE = """
           `;
         });
       }
-      document.getElementById('cart-total-price').innerText = `₦${total.toLocaleString()}`;
+      document.getElementById('promo-code-input').value = appliedPromo ? appliedPromo.code : '';
+      renderCartSummary();
       document.getElementById('cartModal').classList.remove('hidden');
     }
 
     function closeCartModal() { document.getElementById('cartModal').classList.add('hidden'); }
 
+    // ---------------------------------------------------------
+    // FAVORITES
+    // ---------------------------------------------------------
+    async function loadFavorites() {
+      try {
+        const res = await fetch('/api/favorites');
+        const data = await res.json();
+        favoriteIds = new Set((data.favorites || []).map(f => f.cart_item_id));
+        if (currentRestaurant) renderFoods(currentRestaurant.menu);
+      } catch (e) { /* ignore */ }
+    }
+
+    async function toggleFavorite(cartItemId) {
+      const item = findMenuItemByCartId(cartItemId);
+      if (!item) return;
+      try {
+        const res = await fetch('/api/favorites/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cart_item_id: item.cartItemId, name: item.name, restaurant_id: item.restaurantId,
+            restaurant_name: item.restaurantName, price: item.price, emoji: item.emoji
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          if (data.favorited) {
+            favoriteIds.add(cartItemId);
+            showToast(`${item.name} added to favorites`, "success");
+          } else {
+            favoriteIds.delete(cartItemId);
+            showToast(`${item.name} removed from favorites`, "info");
+          }
+          if (currentRestaurant) renderFoods(currentRestaurant.menu);
+        }
+      } catch (e) {
+        showToast("Could not update favorites right now", "error");
+      }
+    }
+
+    async function openFavoritesModal() {
+      const container = document.getElementById('favorites-container');
+      container.innerHTML = `<div style="text-align:center; color:var(--text-muted); font-size:12px; padding:20px;">Loading favorites...</div>`;
+      document.getElementById('favoritesModal').classList.remove('hidden');
+      try {
+        const res = await fetch('/api/favorites');
+        const data = await res.json();
+        const favs = data.favorites || [];
+        if (favs.length === 0) {
+          container.innerHTML = `<div style="text-align:center; color:var(--text-muted); font-size:12px; padding:20px;">You haven't favorited any dishes yet. Tap the heart on any item to save it here.</div>`;
+          return;
+        }
+        container.innerHTML = favs.map(f => `
+          <div class="fav-item">
+            <div class="fav-item-emoji">${f.emoji || '🍽️'}</div>
+            <div class="fav-item-info">
+              <div class="fav-item-name">${f.name}</div>
+              <div class="fav-item-restaurant">${f.restaurant_name}</div>
+            </div>
+            <span class="fav-item-price">₦${Number(f.price).toLocaleString()}</span>
+            <button class="btn-secondary-sm" onclick='addFavoriteToCart(${JSON.stringify(f)})'>+ Add</button>
+          </div>
+        `).join('');
+      } catch (e) {
+        container.innerHTML = `<div style="text-align:center; color:var(--text-muted); font-size:12px; padding:20px;">Could not load favorites.</div>`;
+      }
+    }
+
+    function closeFavoritesModal() { document.getElementById('favoritesModal').classList.add('hidden'); }
+
+    function addFavoriteToCart(fav) {
+      if (cart.length > 0 && cart[0].restaurantId !== fav.restaurant_id) {
+        const confirmed = confirm(
+          `Your cart has items from ${cart[0].restaurantName}. Adding from ${fav.restaurant_name} will clear your current cart. Continue?`
+        );
+        if (!confirmed) return;
+        cart = [];
+      }
+      cart.push({
+        cartItemId: fav.cart_item_id, name: fav.name, price: Number(fav.price), emoji: fav.emoji,
+        restaurantId: fav.restaurant_id, restaurantName: fav.restaurant_name,
+        basePrice: Number(fav.price), modifiers: [],
+        cartInstanceId: Date.now() + Math.random()
+      });
+      updateCartUI();
+      showToast(`${fav.name} added to cart`, "success");
+    }
+
+    // ---------------------------------------------------------
+    // PROFILE, ORDER HISTORY & RE-ORDER
+    // ---------------------------------------------------------
     async function openProfileModal() {
       const res = await fetch('/api/get-profile');
       const data = await res.json();
@@ -1422,6 +2540,7 @@ HTML_TEMPLATE = """
         document.getElementById('profile-address').value = data.address || '';
       }
       document.getElementById('profileModal').classList.remove('hidden');
+      loadOrderHistory();
     }
 
     function closeProfileModal() { document.getElementById('profileModal').classList.add('hidden'); }
@@ -1441,6 +2560,65 @@ HTML_TEMPLATE = """
       } else {
         showToast("Failed to save profile", "error");
       }
+    }
+
+    async function loadOrderHistory() {
+      const container = document.getElementById('order-history-container');
+      container.innerHTML = `<div style="text-align:center; color:var(--text-muted); font-size:11px; padding:10px;">Loading order history...</div>`;
+      try {
+        const res = await fetch('/api/orders/history');
+        const data = await res.json();
+        const orders = data.orders || [];
+        if (orders.length === 0) {
+          container.innerHTML = `<div style="text-align:center; color:var(--text-muted); font-size:11px; padding:10px;">No past orders yet.</div>`;
+          return;
+        }
+        container.innerHTML = orders.map(o => {
+          const dateStr = new Date(o.created_at * 1000).toLocaleDateString();
+          const itemsText = o.items.map(it => it.name).join(', ');
+          return `
+            <div class="order-history-item">
+              <div class="order-history-top">
+                <span class="order-history-id">${o.order_id}${o.restaurant ? ' · ' + o.restaurant : ''}</span>
+                <span class="order-history-date">${dateStr}</span>
+              </div>
+              <div class="order-history-items">${itemsText}</div>
+              <div class="order-history-bottom">
+                <span class="order-history-total">₦${Number(o.total).toLocaleString()}</span>
+                <button class="btn-secondary-sm" onclick='reorderPastOrder(${JSON.stringify(o)})'>↻ Re-order</button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        container.innerHTML = `<div style="text-align:center; color:var(--text-muted); font-size:11px; padding:10px;">Could not load order history.</div>`;
+      }
+    }
+
+    function reorderPastOrder(order) {
+      if (cart.length > 0 && order.restaurant && cart[0].restaurantName !== order.restaurant) {
+        const confirmed = confirm(
+          `Your cart has items from ${cart[0].restaurantName}. Re-ordering from ${order.restaurant} will clear your current cart. Continue?`
+        );
+        if (!confirmed) return;
+        cart = [];
+      } else if (cart.length > 0 && !order.restaurant) {
+        cart = [];
+      }
+
+      order.items.forEach(it => {
+        cart.push({
+          cartItemId: `reorder::${Date.now()}::${Math.random()}`,
+          name: it.name, price: Number(it.price) || 0, emoji: '🍽️',
+          restaurantId: order.restaurant || 'reorder', restaurantName: order.restaurant || 'Previous Order',
+          basePrice: Number(it.price) || 0, modifiers: [],
+          cartInstanceId: Date.now() + Math.random()
+        });
+      });
+      updateCartUI();
+      closeProfileModal();
+      showToast(`${order.items.length} item(s) from ${order.order_id} added to cart`, "success");
+      openCartModal();
     }
 
     async function openAdminModal() {
@@ -1472,13 +2650,25 @@ HTML_TEMPLATE = """
 
     let lastOrder = null;
 
+    function toggleGiftFields() {
+      const on = document.getElementById('gift-toggle').checked;
+      document.getElementById('gift-fields').classList.toggle('hidden', !on);
+    }
+
     function payWithPaystack() {
       if (cart.length === 0) {
         showToast("Your cart is empty!", "error");
         return;
       }
+      const isGift = document.getElementById('gift-toggle').checked;
       const address = document.getElementById('delivery-address').value.trim();
-      if (!address) {
+      const giftAddress = document.getElementById('gift-recipient-address').value.trim();
+      if (isGift) {
+        if (!giftAddress) {
+          showToast("Enter the recipient's delivery address for the gift", "warning");
+          return;
+        }
+      } else if (!address) {
         showToast("Please enter a delivery address", "warning");
         return;
       }
@@ -1492,7 +2682,7 @@ HTML_TEMPLATE = """
       }
 
       const checkoutBtn = document.getElementById('checkout-btn');
-      let totalAmount = cart.reduce((sum, item) => sum + item.price, 0);
+      const { total: totalAmount } = renderCartSummary();
       if (!totalAmount || totalAmount <= 0) {
         showToast("Cart total must be greater than zero.", "error");
         return;
@@ -1506,8 +2696,6 @@ HTML_TEMPLATE = """
           currency: 'NGN',
           ref: `FOODIES-${Date.now()}`,
           callback: function(response) {
-            // Paystack's callback must stay synchronous-friendly; kick off our async work
-            // right away but don't make the user wait on a popup that browsers may block.
             finalizeOrderAfterPayment(address, checkoutBtn);
           },
           onClose: function() {
@@ -1525,11 +2713,21 @@ HTML_TEMPLATE = """
       checkoutBtn.disabled = true;
       checkoutBtn.innerText = "Finalizing order...";
       const restaurantName = cart.length > 0 ? cart[0].restaurantName : '';
+      const isGift = document.getElementById('gift-toggle').checked;
       try {
         const checkoutRes = await fetch('/api/checkout', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: cart, address: address, restaurant: restaurantName })
+          body: JSON.stringify({
+            items: cart,
+            address: address,
+            restaurant: restaurantName,
+            promo_code: appliedPromo ? appliedPromo.code : null,
+            is_gift: isGift,
+            recipient_name: document.getElementById('gift-recipient-name').value.trim(),
+            recipient_address: document.getElementById('gift-recipient-address').value.trim(),
+            gift_message: document.getElementById('gift-message').value.trim()
+          })
         });
         const checkoutData = await checkoutRes.json();
 
@@ -1538,17 +2736,30 @@ HTML_TEMPLATE = """
           return;
         }
 
-        showToast("Payment successful!", "success");
+        const pts = checkoutData.points_awarded || 50;
+        showToast(`Payment successful! +${pts} loyalty points earned ⭐`, "success");
+        if (checkoutData.total_points != null) {
+          updatePointsBadge(checkoutData.total_points);
+        }
         closeCartModal();
         openReceiptModal({
           order_id: checkoutData.order_id,
           items: [...cart],
           total: checkoutData.total,
-          address: address,
-          restaurant: restaurantName
+          discount: checkoutData.discount || 0,
+          address: isGift ? (document.getElementById('gift-recipient-address').value.trim() || address) : address,
+          restaurant: restaurantName,
+          gift_share_link: checkoutData.share_link || null,
+          gift_token: checkoutData.gift_token || null
         });
 
+        // Activate Live Activity / Dynamic Island style tracking bar
+        activateLiveActivity(checkoutData.order_id);
+
         cart = [];
+        appliedPromo = null;
+        document.getElementById('gift-toggle').checked = false;
+        toggleGiftFields();
         updateCartUI();
         document.getElementById('nav-rider-btn').classList.remove('hidden');
       } catch (err) {
@@ -1566,6 +2777,27 @@ HTML_TEMPLATE = """
       document.getElementById('receipt-total').innerText = `₦${Number(order.total).toLocaleString()}`;
       document.getElementById('receipt-address').innerText = order.address;
       document.getElementById('receipt-restaurant').innerText = order.restaurant || '';
+      // Gift share link (if this was a gift order)
+      let existingGift = document.getElementById('receipt-gift-link');
+      if (existingGift) existingGift.remove();
+      if (order.gift_share_link) {
+        const box = document.querySelector('#receiptModal .receipt-box > div');
+        if (box) {
+          const giftEl = document.createElement('div');
+          giftEl.id = 'receipt-gift-link';
+          giftEl.style.cssText = 'margin-top:10px;font-size:11px;word-break:break-all;';
+          giftEl.innerHTML = `<b>🎁 Gift tracking link (share with friend):</b><br><a href="${order.gift_share_link}" target="_blank" style="color:var(--primary)">${window.location.origin}${order.gift_share_link}</a>`;
+          box.appendChild(giftEl);
+        }
+      }
+
+      const discountLine = document.getElementById('receipt-discount-line');
+      if (order.discount && order.discount > 0) {
+        document.getElementById('receipt-discount').innerText = `-₦${Number(order.discount).toLocaleString()}`;
+        discountLine.classList.remove('hidden');
+      } else {
+        discountLine.classList.add('hidden');
+      }
 
       const list = document.getElementById('receipt-items-list');
       list.innerHTML = '';
@@ -1693,6 +2925,186 @@ HTML_TEMPLATE = """
         const badge = document.getElementById('live-visitors');
         if (badge) badge.innerText = `● Online: ${count}`;
       }, 5000);
+    }
+
+    // ---------- Loyalty points ----------
+    async function refreshPoints() {
+      try {
+        const res = await fetch('/api/points');
+        const data = await res.json();
+        if (data.success) updatePointsBadge(data.points);
+      } catch (e) {}
+    }
+    function updatePointsBadge(pts) {
+      const el = document.getElementById('points-badge');
+      if (el) el.innerText = `⭐ ${Number(pts).toLocaleString()} pts`;
+      const profileText = document.getElementById('profile-points-text');
+      if (profileText) profileText.innerHTML = `You have <b>${Number(pts).toLocaleString()}</b> points. Earn 50 points on every order!`;
+    }
+
+    // ---------- Live Activity (Dynamic Island approximation) ----------
+    function activateLiveActivity(orderId) {
+      const bar = document.getElementById('live-activity-bar');
+      document.getElementById('la-order-id').innerText = orderId;
+      document.getElementById('la-status-text').innerText = 'Out for delivery';
+      document.getElementById('la-progress-fill').style.width = '65%';
+      bar.classList.add('show');
+      if ('Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification('Foodies · Order on the way 🛵', {
+            body: `Tracking ${orderId}. Tap to open tracker.`,
+            tag: 'foodies-live-' + orderId
+          });
+        } catch (e) {}
+      }
+      setTimeout(() => {
+        document.getElementById('la-progress-fill').style.width = '85%';
+        document.getElementById('la-status-text').innerText = 'Almost there';
+      }, 45000);
+      setTimeout(() => {
+        document.getElementById('la-progress-fill').style.width = '100%';
+        document.getElementById('la-status-text').innerText = 'Delivered ✓';
+        setTimeout(() => bar.classList.remove('show'), 8000);
+      }, 90000);
+    }
+
+    // ---------- In-App Rider Calling (masked line simulation) ----------
+    async function startRiderCall() {
+      const statusEl = document.getElementById('rider-call-status');
+      statusEl.style.display = 'block';
+      statusEl.innerText = 'Connecting via secure masked line...';
+      try {
+        const res = await fetch('/api/rider-call', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          statusEl.innerHTML = `✅ ${data.message}<br><b>Masked #:</b> ${data.masked_number}<br><span style="opacity:0.8">Session ${data.session_id}</span>`;
+          showToast('Masked call session started — your number stays private', 'success');
+          setTimeout(() => { window.location.href = 'tel:+2348003663743'; }, 1200);
+        } else {
+          statusEl.innerText = data.error || 'Could not start call';
+        }
+      } catch (e) {
+        statusEl.innerText = 'Connection error. Try again.';
+      }
+    }
+
+    // ---------- Friends & Social Picks ----------
+    async function addFriend() {
+      const input = document.getElementById('friend-email-input');
+      const friend_email = input.value.trim();
+      if (!friend_email) { showToast('Enter a friend email', 'warning'); return; }
+      try {
+        const res = await fetch('/api/friends/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ friend_email })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(data.message, 'success');
+          input.value = '';
+          loadFriendsAndPicks();
+        } else {
+          showToast(data.error || 'Could not add friend', 'error');
+        }
+      } catch (e) {
+        showToast('Network error adding friend', 'error');
+      }
+    }
+
+    async function loadFriendsAndPicks() {
+      const friendsList = document.getElementById('friends-list');
+      const picksContainer = document.getElementById('friends-picks-container');
+      if (!friendsList || !picksContainer) return;
+      try {
+        const [fRes, pRes] = await Promise.all([
+          fetch('/api/friends'),
+          fetch('/api/friends/picks')
+        ]);
+        const fData = await fRes.json();
+        const pData = await pRes.json();
+        const friends = fData.friends || [];
+        friendsList.innerHTML = friends.length
+          ? friends.map(f => `<span class="user-badge" style="margin:2px;display:inline-block;">@${f.username}</span>`).join('')
+          : '<span style="font-size:11px;color:var(--text-muted);">No friends yet — add someone by email.</span>';
+        const picks = pData.picks || [];
+        if (picks.length === 0) {
+          picksContainer.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px;">No friend picks yet. Add friends to see their favorites here.</div>';
+        } else {
+          picksContainer.innerHTML = picks.map(p => `
+            <div class="picks-item">
+              <div class="fav-item-emoji">${p.emoji || '🍽️'}</div>
+              <div class="fav-item-info">
+                <div class="fav-item-name">${p.name}</div>
+                <div class="fav-item-restaurant">${p.restaurant_name} · picked by @${p.friend_username}</div>
+              </div>
+              <span class="fav-item-price">₦${Number(p.price).toLocaleString()}</span>
+              <button class="btn-secondary-sm" onclick='addFavoriteToCart(${JSON.stringify({
+                cart_item_id: p.cart_item_id, name: p.name, price: p.price, emoji: p.emoji,
+                restaurant_id: p.restaurant_id, restaurant_name: p.restaurant_name
+              })})'>+ Add</button>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        friendsList.innerHTML = '';
+        picksContainer.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">Could not load social picks.</div>';
+      }
+    }
+
+    // ---------- Dispute center ----------
+    let disputePhotoB64 = '';
+    function previewDisputePhoto(event) {
+      const file = event.target.files && event.target.files[0];
+      const preview = document.getElementById('dispute-photo-preview');
+      if (!file) { preview.style.display = 'none'; disputePhotoB64 = ''; return; }
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        disputePhotoB64 = e.target.result;
+        preview.src = disputePhotoB64;
+        preview.style.display = 'block';
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function submitDispute() {
+      const order_id = document.getElementById('dispute-order-id').value.trim();
+      const reason = document.getElementById('dispute-reason').value.trim();
+      if (!order_id || !reason) {
+        showToast('Order ID and reason are required', 'warning');
+        return;
+      }
+      try {
+        const res = await fetch('/api/dispute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order_id, reason, photo_b64: disputePhotoB64 })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(data.message, 'success');
+          if (data.total_points != null) updatePointsBadge(data.total_points);
+          document.getElementById('dispute-order-id').value = '';
+          document.getElementById('dispute-reason').value = '';
+          document.getElementById('dispute-photo').value = '';
+          document.getElementById('dispute-photo-preview').style.display = 'none';
+          disputePhotoB64 = '';
+        } else {
+          showToast(data.error || 'Dispute failed', 'error');
+        }
+      } catch (e) {
+        showToast('Could not submit dispute', 'error');
+      }
+    }
+
+    // Hook profile open to load social + points
+    const _origOpenProfile = typeof openProfileModal === 'function' ? openProfileModal : null;
+    if (_origOpenProfile) {
+      openProfileModal = async function() {
+        await _origOpenProfile();
+        refreshPoints();
+        loadFriendsAndPicks();
+      };
     }
   </script>
 </body>
