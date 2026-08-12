@@ -1,13 +1,27 @@
 import sqlite3
+import time
+import os
 from flask import Flask, jsonify, request, session, render_template_string
 
 app = Flask(__name__)
-app.secret_key = "super_secret_foodies_key"
+app.secret_key = os.environ.get("SECRET_KEY", "super_secret_foodies_key")
 DB_FILE = "users.db"
+
+# Track active visitors (IP Address -> Last Active Timestamp)
+active_visitors = {}
+
+# Simulated live rider tracking coordinates
+rider_status = {
+    "lat": 9.05785,
+    "lng": 7.49508,
+    "dest_lat": 9.07647,
+    "dest_lng": 7.39857,
+    "status": "In Transit"
+}
 
 
 # ---------------------------------------------------------
-# DATABASE SETUP (Creates users.db with Static PIN support)
+# DATABASE SETUP & HELPERS
 # ---------------------------------------------------------
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
@@ -41,26 +55,29 @@ def get_user(email):
         cursor.execute("SELECT email, password, pin FROM users WHERE email = ?", (email,))
         row = cursor.fetchone()
         if row:
-            return {
-                "email": row[0],
-                "password": row[1],
-                "pin": row[2]
-            }
+            return {"email": row[0], "password": row[1], "pin": row[2]}
     return None
 
 
 def save_user(email, password, pin):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-                       INSERT INTO users (email, password, pin)
-                       VALUES (?, ?, ?)
-                       ''', (email, password, pin))
+        cursor.execute("INSERT INTO users (email, password, pin) VALUES (?, ?, ?)", (email, password, pin))
         conn.commit()
 
 
+def extract_username(email):
+    return email.split('@')[0] if email and '@' in email else email
+
+
+@app.before_request
+def track_visitors():
+    """Middleware to track user activity in real time."""
+    active_visitors[request.remote_addr] = time.time()
+
+
 # ---------------------------------------------------------
-# FRONTEND TEMPLATE
+# FRONTEND TEMPLATE (HTML + JS + LEAFLET MAP)
 # ---------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -68,134 +85,391 @@ HTML_TEMPLATE = """
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Foodies - Express Delivery</title>
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <title>Foodies | Premium Culinary Delivery</title>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <script src="https://js.paystack.co/v1/inline.js"></script>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; }
-    body { min-height: 100vh; background: linear-gradient(135deg, #74ebd5 0%, #9aceff 100%); background-attachment: fixed; color: #1e293b; position: relative; }
-    body::before { content: ""; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80"><text x="10" y="25" fill="rgba(255,255,255,0.22)" font-size="12" font-weight="bold">foodies</text></svg>'); background-repeat: repeat; pointer-events: none; z-index: 0; }
+    :root {
+      --primary: #ff4757;
+      --primary-hover: #ff6b81;
+      --accent: #2ed573;
+      --dark: #0f172a;
+      --card-bg: rgba(255, 255, 255, 0.75);
+      --border: rgba(255, 255, 255, 0.6);
+      --glass-shadow: 0 20px 40px rgba(0, 0, 0, 0.08);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; }
+
+    body { 
+      min-height: 100vh; 
+      background: 
+        radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.6) 0%, transparent 40%),
+        radial-gradient(circle at 80% 80%, rgba(255, 255, 255, 0.5) 0%, transparent 40%),
+        linear-gradient(180deg, #38bdf8 0%, #7dd3fc 35%, #bae6fd 70%, #e0f2fe 100%); 
+      background-attachment: fixed; 
+      color: #1e293b; 
+      position: relative; 
+      overflow-x: hidden;
+    }
+
+    .bg-watermarks {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      pointer-events: none; z-index: 0; overflow: hidden;
+    }
+
+    .watermark {
+      position: absolute; font-size: clamp(3rem, 6vw, 7rem); font-weight: 900;
+      color: rgba(255, 255, 255, 0.22); text-transform: uppercase; letter-spacing: -2px; user-select: none;
+    }
+
+    .wm-1 { top: 5%; left: -2%; transform: rotate(-12deg); }
+    .wm-2 { top: 18%; right: 5%; transform: rotate(15deg); }
+    .wm-3 { top: 45%; left: 10%; transform: rotate(-8deg); }
+    .wm-4 { top: 60%; right: -3%; transform: rotate(10deg); }
+    .wm-5 { bottom: 5%; left: 35%; transform: rotate(-5deg); }
+
     .hidden { display: none !important; }
-    .auth-container { min-height: 100vh; display: flex; justify-content: center; align-items: center; position: relative; z-index: 1; }
-    .card { background: rgba(255, 255, 255, 0.35); backdrop-filter: blur(16px); padding: 35px 30px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 10px 30px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
-    h2 { font-size: 26px; margin-bottom: 8px; color: #0f172a; }
-    p { font-size: 13px; color: #475569; margin-bottom: 20px; }
-    input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.6); background: rgba(255,255,255,0.6); outline: none; }
-    button { width: 100%; padding: 12px; font-weight: 600; background: linear-gradient(135deg, #ff6b6b, #ff8e53); color: white; border: none; border-radius: 10px; cursor: pointer; margin-top: 5px; }
-    .toggle-link { margin-top: 15px; font-size: 12px; color: #0f172a; cursor: pointer; text-decoration: underline; font-weight: 600; }
-    .app-container { max-width: 1200px; margin: 0 auto; padding: 20px; position: relative; z-index: 1; }
-    nav { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: rgba(255, 255, 255, 0.35); backdrop-filter: blur(12px); border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.4); margin-bottom: 30px; }
-    .logo { font-size: 24px; font-weight: 700; color: #0f172a; }
-    .nav-actions { display: flex; gap: 15px; align-items: center; }
-    .btn-logout { background: #0f172a; color: white; padding: 8px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; border: none; }
-    .hero { text-align: center; margin: 10px 0 30px; }
-    .search-bar { max-width: 550px; margin: 15px auto 0; display: flex; background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px); border-radius: 50px; padding: 6px 10px 6px 20px; border: 1px solid rgba(255, 255, 255, 0.8); }
-    .search-bar input { border: none; background: transparent; width: 100%; outline: none; margin: 0; }
-    .categories { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 25px; }
-    .category-chip { background: rgba(255, 255, 255, 0.4); padding: 8px 18px; border-radius: 30px; border: 1px solid rgba(255, 255, 255, 0.5); cursor: pointer; white-space: nowrap; font-weight: 500; }
-    .category-chip.active { background: #0f172a; color: white; }
+
+    .auth-container { 
+      min-height: 100vh; display: flex; justify-content: center; align-items: center; 
+      padding: 20px; position: relative; z-index: 1;
+    }
+
+    .auth-card { 
+      background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px); 
+      border-radius: 24px; border: 1px solid var(--border); box-shadow: var(--glass-shadow); 
+      padding: 40px 32px; width: 100%; max-width: 380px; text-align: center; 
+    }
+
+    .brand-logo { font-size: 26px; font-weight: 800; color: var(--dark); letter-spacing: -0.5px; }
+    .brand-logo span { color: var(--primary); }
+
+    .auth-subtitle { font-size: 13px; color: #64748b; margin-top: 4px; margin-bottom: 24px; }
+
+    .form-group { margin-bottom: 14px; text-align: left; }
+    .form-group label { font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; display: block; }
+
+    input { 
+      width: 100%; padding: 12px 16px; border-radius: 12px; border: 1px solid #cbd5e1; 
+      background: white; outline: none; font-size: 13px; transition: all 0.2s ease; 
+    }
+
+    input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(255, 71, 87, 0.15); }
+
+    .btn-primary { 
+      width: 100%; padding: 12px; font-weight: 700; font-size: 13px; 
+      background: linear-gradient(135deg, var(--primary), #ff6348); 
+      color: white; border: none; border-radius: 12px; cursor: pointer; 
+      transition: all 0.2s; box-shadow: 0 4px 12px rgba(255, 71, 87, 0.25);
+    }
+
+    .btn-primary:hover { opacity: 0.95; transform: translateY(-1px); }
+
+    .toggle-link { margin-top: 16px; font-size: 12px; color: var(--dark); cursor: pointer; font-weight: 600; text-decoration: underline; }
+
+    .app-container { max-width: 1280px; margin: 0 auto; padding: 24px; position: relative; z-index: 1; }
+
+    nav { 
+      display: flex; justify-content: space-between; align-items: center; 
+      padding: 16px 28px; background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(16px); 
+      border-radius: 20px; border: 1px solid var(--border); box-shadow: var(--glass-shadow); margin-bottom: 30px; 
+    }
+
+    .nav-actions { display: flex; gap: 12px; align-items: center; }
+
+    .user-badge { 
+      font-size: 13px; font-weight: 600; background: rgba(15, 23, 42, 0.05); 
+      padding: 8px 14px; border-radius: 10px; color: var(--dark); 
+    }
+
+    .btn-nav-action { 
+      padding: 8px 16px; border-radius: 10px; font-size: 12px; font-weight: 700; 
+      cursor: pointer; border: none; display: flex; align-items: center; gap: 6px; transition: all 0.2s; 
+    }
+
+    .btn-cart { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(255, 71, 87, 0.2); }
+    .btn-cart-count { background: white; color: var(--primary); padding: 2px 7px; border-radius: 20px; font-size: 11px; }
+    .btn-rider { background: #10b981; color: white; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2); }
+    .btn-logout { background: #e2e8f0; color: #475569; }
+
+    .hero-section { text-align: center; margin: 20px 0 32px; }
+    .hero-section h1 { font-size: 32px; font-weight: 800; color: var(--dark); letter-spacing: -1px; }
+    .hero-section p { font-size: 14px; color: #334155; margin-top: 4px; font-weight: 500; }
+
+    .search-wrapper { max-width: 550px; margin: 20px auto 0; position: relative; }
+    .search-wrapper input { padding-left: 20px; height: 50px; border-radius: 30px; border: 1px solid rgba(255,255,255,0.9); background: rgba(255, 255, 255, 0.9); box-shadow: var(--glass-shadow); font-size: 14px; }
+
+    .categories-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 30px; }
+    .category-pill { 
+      background: rgba(255, 255, 255, 0.85); padding: 10px 20px; border-radius: 40px; 
+      border: 1px solid var(--border); cursor: pointer; font-size: 13px; font-weight: 600; 
+      color: #475569; white-space: nowrap; transition: all 0.2s; 
+    }
+
+    .category-pill.active { background: var(--dark); color: white; border-color: var(--dark); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15); }
+
     .food-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
-    .food-card { background: rgba(255, 255, 255, 0.45); backdrop-filter: blur(12px); border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.5); padding: 16px; }
-    .food-img { width: 100%; height: 110px; background: rgba(255, 255, 255, 0.5); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 42px; margin-bottom: 10px; }
-    .food-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
-    .food-desc { font-size: 12px; color: #475569; height: 34px; overflow: hidden; }
-    .food-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
-    .price { font-size: 15px; font-weight: 700; color: #e84118; }
-    .btn-buy { background: #0f172a; color: white; border: none; padding: 6px 14px; border-radius: 8px; font-weight: 600; cursor: pointer; }
-    .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.5); backdrop-filter: blur(8px); display: flex; justify-content: center; align-items: center; z-index: 10; }
-    .checkout-card { background: white; border-radius: 20px; padding: 30px; width: 90%; max-width: 420px; text-align: left; }
-    .close-btn { float: right; cursor: pointer; font-weight: bold; }
+
+    .food-card { 
+      background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(12px); border-radius: 20px; 
+      border: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; 
+      justify-content: space-between; transition: transform 0.2s, box-shadow 0.2s; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.03); 
+    }
+
+    .food-card:hover { transform: translateY(-4px); box-shadow: var(--glass-shadow); }
+
+    .food-img-frame { width: 100%; height: 140px; border-radius: 14px; overflow: hidden; margin-bottom: 12px; background: #e2e8f0; }
+    .food-img-frame img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s ease; }
+    .food-card:hover .food-img-frame img { transform: scale(1.05); }
+
+    .food-title { font-size: 15px; font-weight: 700; color: var(--dark); }
+    .food-desc { font-size: 11px; color: #64748b; margin-top: 4px; height: 32px; overflow: hidden; line-height: 1.4; }
+
+    .food-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
+    .food-price { font-size: 15px; font-weight: 800; color: var(--primary); }
+    .btn-add { background: var(--dark); color: white; border: none; padding: 8px 14px; border-radius: 10px; font-size: 11px; font-weight: 700; cursor: pointer; }
+
+    .modal-overlay { 
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+      background: rgba(15, 23, 42, 0.4); backdrop-filter: blur(8px); 
+      display: flex; justify-content: center; align-items: center; z-index: 100; padding: 20px; 
+    }
+
+    .modal-box { background: white; border-radius: 24px; padding: 28px; width: 100%; max-width: 440px; box-shadow: 0 25px 50px rgba(0,0,0,0.2); }
+
+    .chat-box { 
+      background: #ffffff; border-radius: 24px; width: 100%; max-width: 460px; height: 580px; 
+      display: flex; flex-direction: column; box-shadow: 0 25px 50px rgba(0,0,0,0.2); overflow: hidden; 
+    }
+
+    .chat-header { padding: 16px 20px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; }
+
+    #rider-map { height: 180px; width: 100%; border-bottom: 1px solid #e2e8f0; }
+
+    .chat-body { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; background: #fafafa; }
+
+    .chat-msg { max-width: 80%; padding: 10px 14px; border-radius: 16px; font-size: 12px; line-height: 1.5; }
+    .chat-msg.rider { background: white; border: 1px solid #e2e8f0; color: #1e293b; align-self: flex-start; border-bottom-left-radius: 2px; }
+    .chat-msg.user { background: var(--dark); color: white; align-self: flex-end; border-bottom-right-radius: 2px; }
+
+    .chat-input-area { padding: 14px 18px; border-top: 1px solid #e2e8f0; background: white; display: flex; gap: 8px; }
+
+    #toast {
+      position: fixed; bottom: 20px; right: 20px; background: var(--dark); color: white; 
+      padding: 12px 20px; border-radius: 12px; font-size: 12px; font-weight: 600; 
+      box-shadow: 0 10px 25px rgba(0,0,0,0.15); z-index: 200; transition: opacity 0.3s, transform 0.3s;
+    }
   </style>
 </head>
 <body>
 
+  <div class="bg-watermarks">
+    <div class="watermark wm-1">Foodies.</div>
+    <div class="watermark wm-2">Foodies.</div>
+    <div class="watermark wm-3">Foodies.</div>
+    <div class="watermark wm-4">Foodies.</div>
+    <div class="watermark wm-5">Foodies.</div>
+  </div>
+
+  <div id="toast" class="hidden">Notification message</div>
+
   <div id="auth-wrapper" class="auth-container">
-    <div id="login-screen" class="card">
-      <h2>Foodies 🍕</h2>
-      <p>Sign in to your account</p>
-      <input type="email" id="login-email" placeholder="you@example.com">
-      <input type="password" id="login-password" placeholder="••••••••">
-      <button onclick="handleLogin()">Sign In</button>
-      <div class="toggle-link" onclick="showAuthScreen('signup-screen')">Don't have an account? Create one</div>
+    <div id="login-screen" class="auth-card">
+      <div class="brand-logo">Foodies<span>.</span></div>
+      <div class="auth-subtitle">Sign in to experience fine fast delivery</div>
+      <div class="form-group">
+        <label>Email Address</label>
+        <input type="email" id="login-email" placeholder="name@example.com">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="login-password" placeholder="••••••••">
+      </div>
+      <button class="btn-primary" onclick="handleLogin()">Sign In</button>
+      <div class="toggle-link" onclick="showAuthScreen('signup-screen')">Don't have an account? Register</div>
     </div>
 
-    <div id="signup-screen" class="card hidden">
-      <h2>Join Foodies 🍕</h2>
-      <p>Create account & set your permanent 6-digit PIN</p>
-      <input type="email" id="signup-email" placeholder="you@example.com">
-      <input type="password" id="signup-password" placeholder="Password">
-      <input type="text" id="signup-pin" maxlength="6" placeholder="Create 6-Digit PIN (e.g. 282828)" style="text-align: center; letter-spacing: 2px;">
-      <button onclick="handleSignup()">Create Account</button>
-      <div class="toggle-link" onclick="showAuthScreen('login-screen')">Already have an account? Sign In</div>
+    <div id="signup-screen" class="auth-card hidden">
+      <div class="brand-logo">Foodies<span>.</span></div>
+      <div class="auth-subtitle">Create your personal account</div>
+      <div class="form-group">
+        <label>Email Address</label>
+        <input type="email" id="signup-email" placeholder="name@example.com">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="signup-password" placeholder="••••••••">
+      </div>
+      <div class="form-group">
+        <label>6-Digit Security PIN</label>
+        <input type="text" id="signup-pin" maxlength="6" placeholder="123456" style="text-align: center; letter-spacing: 2px;">
+      </div>
+      <button class="btn-primary" onclick="handleSignup()">Register Account</button>
+      <div class="toggle-link" onclick="showAuthScreen('login-screen')">Back to Sign In</div>
     </div>
 
-    <div id="verify-screen" class="card hidden">
-      <h2>Enter Security PIN 🛡️</h2>
-      <p>Enter your 6-digit PIN to access your account:</p>
-      <input type="text" id="verify-pin" maxlength="6" placeholder="282828" style="text-align: center; font-size: 20px; letter-spacing: 4px;">
-      <button onclick="handleVerifyPIN()">Verify & Login</button>
+    <div id="verify-screen" class="auth-card hidden">
+      <div class="brand-logo">Security<span>.</span></div>
+      <div class="auth-subtitle">Enter your 6-digit PIN to authenticate</div>
+      <div class="form-group">
+        <input type="text" id="verify-pin" maxlength="6" placeholder="******" style="text-align: center; font-size: 18px; letter-spacing: 4px;">
+      </div>
+      <button class="btn-primary" onclick="handleVerifyPIN()">Confirm PIN</button>
     </div>
   </div>
 
   <div id="menu-wrapper" class="app-container hidden">
     <nav>
-      <div class="logo">Foodies 🍕</div>
+      <div class="brand-logo">Foodies<span>.</span></div>
       <div class="nav-actions">
-        <span id="user-display-email" style="font-weight: 500;"></span>
-        <button class="btn-logout" onclick="handleLogout()">Log Out</button>
+        <span id="live-visitors" class="user-badge" style="background:#dcfce7; color:#166534;">● Online: 1</span>
+        <span id="user-display-email" class="user-badge"></span>
+        <button id="nav-rider-btn" class="btn-nav-action btn-rider hidden" onclick="toggleRiderChatModal()">🛵 Track Rider</button>
+        <button class="btn-nav-action btn-cart" onclick="openCartModal()">🛒 Cart <span id="cart-count-badge" class="btn-cart-count">0</span></button>
+        <button class="btn-nav-action btn-logout" onclick="handleLogout()">Log Out</button>
       </div>
     </nav>
 
-    <div class="hero">
-      <h1>Explore Our Full Menu</h1>
-      <div class="search-bar">
-        <input type="text" id="searchInput" placeholder="Search 50+ meals, drinks, desserts..." onkeyup="filterFoods()">
+    <div class="hero-section">
+      <h1>Delicious Meals, Express Delivery</h1>
+      <p>Select from our curated menu cooked by top chefs</p>
+      <div class="search-wrapper">
+        <input type="text" id="searchInput" placeholder="Search 100+ dishes, drinks, local specials..." onkeyup="filterFoods()">
       </div>
     </div>
 
-    <div class="categories" id="categoryContainer">
-      <div class="category-chip active" onclick="filterCategory('All')">🔥 All</div>
-      <div class="category-chip" onclick="filterCategory('Pizza')">🍕 Pizza</div>
-      <div class="category-chip" onclick="filterCategory('Burgers')">🍔 Burgers</div>
-      <div class="category-chip" onclick="filterCategory('Local')">🍲 Local Specials</div>
-      <div class="category-chip" onclick="filterCategory('Sides')">🍟 Sides</div>
-      <div class="category-chip" onclick="filterCategory('Drinks')">🧃 Drinks</div>
-      <div class="category-chip" onclick="filterCategory('Desserts')">🍰 Desserts</div>
+    <div class="categories-row" id="categoryContainer">
+      <div class="category-pill active" onclick="filterCategory('All')">All Items</div>
+      <div class="category-pill" onclick="filterCategory('Pizza')">Pizza</div>
+      <div class="category-pill" onclick="filterCategory('Burgers')">Burgers</div>
+      <div class="category-pill" onclick="filterCategory('Local')">Local Specials</div>
+      <div class="category-pill" onclick="filterCategory('Sides')">Sides</div>
+      <div class="category-pill" onclick="filterCategory('Drinks')">Drinks</div>
+      <div class="category-pill" onclick="filterCategory('Desserts')">Desserts</div>
     </div>
 
     <div class="food-grid" id="foodGrid"></div>
   </div>
 
-  <div id="checkoutModal" class="modal-overlay hidden">
-    <div class="checkout-card">
-      <span class="close-btn" onclick="closeCheckout()">✕</span>
-      <h3 style="margin-bottom: 10px;">Checkout & Pay</h3>
-      <p id="checkout-item-name" style="font-weight: 600; color: #0f172a; margin-bottom: 5px;"></p>
-      <p id="checkout-item-price" style="color: #e84118; font-weight: 700; margin-bottom: 15px;"></p>
+  <div id="cartModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 style="font-size: 18px; font-weight: 800;">Your Order Basket</h3>
+        <span style="cursor: pointer; font-weight: bold; font-size: 18px;" onclick="closeCartModal()">✕</span>
+      </div>
 
-      <label style="font-size: 12px; font-weight: 600;">Delivery Address</label>
-      <input type="text" id="delivery-address" placeholder="e.g. Sauka new site gate, House 5">
+      <div id="cart-items-container" style="max-height: 200px; overflow-y: auto; margin-bottom: 16px;"></div>
 
-      <button onclick="payWithPaystack()">Pay Now</button>
+      <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 16px; margin-bottom: 16px;">
+        <span>Total:</span>
+        <span id="cart-total-price" style="color: var(--primary);">₦0</span>
+      </div>
+
+      <div class="form-group">
+        <label>Delivery Address</label>
+        <input type="text" id="delivery-address" placeholder="e.g. Sauka new site gate, House 5">
+      </div>
+
+      <button class="btn-primary" onclick="payWithPaystack()">Proceed to Checkout</button>
+    </div>
+  </div>
+
+  <div id="chatModal" class="modal-overlay hidden">
+    <div class="chat-box">
+      <div class="chat-header">
+        <div>
+          <h4 style="font-size: 14px; font-weight: 700;">Delivery Dispatcher</h4>
+          <span id="live-rider-status" style="font-size: 11px; color: #10b981; font-weight: 600;">● In Transit</span>
+        </div>
+        <span style="cursor: pointer; font-weight: bold;" onclick="closeChatModal()">✕</span>
+      </div>
+
+      <div id="rider-map"></div>
+
+      <div class="chat-body" id="chatMessages"></div>
+      <div id="typingIndicator" style="font-size: 11px; color: #64748b; padding: 4px 20px;" class="hidden">Rider is typing...</div>
+
+      <div class="chat-input-area">
+        <input type="text" id="chatInput" placeholder="Type message..." onkeypress="handleChatKeyPress(event)">
+        <button class="btn-primary" style="width: auto; padding: 0 18px;" onclick="sendChatMessage()">Send</button>
+      </div>
     </div>
   </div>
 
   <script>
     let activeUserEmail = "";
-    let selectedItem = null;
+    let cart = [];
+    let map, riderMarker;
+    let pollRiderInterval;
+
     const PAYSTACK_PUBLIC_KEY = "pk_test_15c3892f5824f99266724433804c708899e1994f";
+    const fallbackSVG = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="500" height="300" viewBox="0 0 500 300" fill="%23f1f5f9"><rect width="100%" height="100%" fill="%23e2e8f0"/><text x="50%" y="50%" font-family="sans-serif" font-size="24" font-weight="bold" fill="%2394a3b8" text-anchor="middle" dominant-baseline="middle">🍱 Food Item</text></svg>`;
+
+    // --- GENERATE 100 FOOD ITEMS ---
+    const categories = ["Pizza", "Burgers", "Local", "Sides", "Drinks", "Desserts"];
+
+    const sampleImages = {
+      Pizza: "https://images.unsplash.com/photo-1628840042765-356cda07504e?w=500&q=80",
+      Burgers: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=500&q=80",
+      Local: "https://images.unsplash.com/photo-1604329760661-e71dc83f8f26?w=500&q=80",
+      Sides: "https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=500&q=80",
+      Drinks: "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&q=80",
+      Desserts: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=500&q=80"
+    };
+
+    const itemPrefixes = {
+      Pizza: ["Pepperoni", "Margherita", "BBQ Chicken", "Four Cheese", "Hawaiian", "Veggie Delight", "Meat Feast", "Truffle Mushroom"],
+      Burgers: ["Classic Cheese", "Double Smash", "Bacon Deluxe", "Crispy Chicken", "Veggie Beyond", "Mushroom Swiss", "Spicy Zinger", "Avocado Beef"],
+      Local: ["Smokey Jollof", "Suya Skewers", "Egusi Special", "Fried Rice", "Ofada Delicacy", "Spicy Asun", "Fisherman Soup", "Pepper Soup"],
+      Sides: ["Crispy Fries", "Onion Rings", "Garlic Bread", "Coleslaw", "Mozzarella Sticks", "Sweet Potato Fries", "Mac & Cheese", "Potato Wedges"],
+      Drinks: ["Iced Cola", "Fresh Lemonade", "Orange Juice", "Vanilla Milkshake", "Iced Peach Tea", "Sparkling Soda", "Mango Smoothie", "Special Chapman"],
+      Desserts: ["Lava Cake", "NY Cheesecake", "Apple Pie", "Ice Cream Sundae", "Fudge Brownie", "Tiramisu", "Belgian Waffle", "Glazed Donut"]
+    };
+
+    const foodItems = [];
+
+    for (let i = 1; i <= 100; i++) {
+      const category = categories[(i - 1) % categories.length];
+      const prefixes = itemPrefixes[category];
+      const baseName = prefixes[(i - 1) % prefixes.length];
+      const variantNum = Math.floor((i - 1) / (categories.length * prefixes.length)) + 1;
+      const name = variantNum > 1 ? `${baseName} Combo ${variantNum}` : `${baseName} Special`;
+
+      foodItems.push({
+        id: i,
+        name: name,
+        category: category,
+        price: ((i % 15) + 15) * 250, // Prices range between ₦3,750 and ₦7,250
+        image: sampleImages[category],
+        desc: `Freshly prepared ${name.toLowerCase()} made with premium ingredients.`
+      });
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      toast.innerText = msg;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 3000);
+    }
 
     function showAuthScreen(id) {
-      document.querySelectorAll('.auth-container .card').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.auth-container .auth-card').forEach(el => el.classList.add('hidden'));
       document.getElementById(id).classList.remove('hidden');
     }
 
-    function openMenu(email) {
+    function openMenu(email, username) {
       activeUserEmail = email;
       document.getElementById('auth-wrapper').classList.add('hidden');
       document.getElementById('menu-wrapper').classList.remove('hidden');
-      document.getElementById('user-display-email').innerText = "Hello, " + email;
+      document.getElementById('user-display-email').innerText = username;
       renderFoods(foodItems);
+      updateCartUI();
+      startVisitorMonitoring();
     }
 
     async function handleSignup() {
@@ -211,10 +485,10 @@ HTML_TEMPLATE = """
       const data = await res.json();
 
       if (data.success) {
-        alert("Account created with PIN " + pin + "! Logging you in...");
-        openMenu(data.email);
+        showToast("Account created successfully!");
+        openMenu(data.email, data.username);
       } else {
-        alert(data.error);
+        showToast(data.error);
       }
     }
 
@@ -232,7 +506,7 @@ HTML_TEMPLATE = """
       if (data.require_pin) {
         showAuthScreen('verify-screen');
       } else {
-        alert(data.error);
+        showToast(data.error || "Login failed");
       }
     }
 
@@ -246,211 +520,235 @@ HTML_TEMPLATE = """
       const data = await res.json();
 
       if (data.success) {
-        openMenu(data.email);
+        openMenu(data.email, data.username);
       } else {
-        alert(data.error);
+        showToast(data.error);
       }
     }
 
     async function handleLogout() {
       await fetch('/api/logout', { method: 'POST' });
+      cart = [];
+      document.getElementById('nav-rider-btn').classList.add('hidden');
       document.getElementById('menu-wrapper').classList.add('hidden');
       document.getElementById('auth-wrapper').classList.remove('hidden');
       showAuthScreen('login-screen');
     }
 
-    const foodItems = [
-      { id: 1, name: "Pepperoni Passion", category: "Pizza", price: 12500, icon: "🍕", desc: "Classic tomato sauce and double pepperoni" },
-      { id: 2, name: "Margherita Supreme", category: "Pizza", price: 9800, icon: "🍕", desc: "Fresh basil, mozzarella, and plum tomatoes" },
-      { id: 3, name: "BBQ Chicken Pizza", category: "Pizza", price: 13500, icon: "🍕", desc: "Grilled chicken with smoky BBQ sauce" },
-      { id: 4, name: "Hawaiian Twist", category: "Pizza", price: 11000, icon: "🍕", desc: "Juicy pineapple chunks and smoked ham" },
-      { id: 5, name: "Veggie Garden", category: "Pizza", price: 10500, icon: "🍕", desc: "Bell peppers, onions, mushrooms & olives" },
-      { id: 6, name: "Meat Lovers Deluxe", category: "Pizza", price: 14500, icon: "🍕", desc: "Sausage, bacon, pepperoni, and beef" },
-      { id: 7, name: "Classic Cheeseburger", category: "Burgers", price: 6500, icon: "🍔", desc: "Beef patty with cheddar and lettuce" },
-      { id: 8, name: "Double Smash Burger", category: "Burgers", price: 8500, icon: "🍔", desc: "Two seared beef patties with special sauce" },
-      { id: 9, name: "Crispy Chicken Burger", category: "Burgers", price: 7000, icon: "🍔", desc: "Fried chicken breast with mayo & pickles" },
-      { id: 10, name: "Spicy Jalapeño Burger", category: "Burgers", price: 7500, icon: "🍔", desc: "Pepper jack cheese and sliced jalapeños" },
-      { id: 11, name: "Mushroom Swiss Burger", category: "Burgers", price: 8000, icon: "🍔", desc: "Sautéed mushrooms and melted Swiss" },
-      { id: 12, name: "Veggie Bean Burger", category: "Burgers", price: 6000, icon: "🍔", desc: "Black bean patty with avocado spread" },
-      { id: 13, name: "Smokey Jollof Rice", category: "Local", price: 4500, icon: "🍲", desc: "Served with fried plantains and chicken" },
-      { id: 14, name: "Suya Beef Skewers", category: "Local", price: 3500, icon: "🍢", desc: "Spicy grilled beef with sliced onions" },
-      { id: 15, name: "Fried Rice & Chicken", category: "Local", price: 4800, icon: "🍛", desc: "Seasoned rice with mixed vegetables" },
-      { id: 16, name: "Pounded Yam & Egusi", category: "Local", price: 5500, icon: "🍲", desc: "Rich melon seed soup with tender beef" },
-      { id: 17, name: "Peppered Goat Meat", category: "Local", price: 6500, icon: "🥩", desc: "Spicy tossed goat meat chunks" },
-      { id: 18, name: "Catfish Pepper Soup", category: "Local", price: 7000, icon: "🥣", desc: "Hot traditional herbal fish soup" },
-      { id: 19, name: "Ewa Agoyin & Bread", category: "Local", price: 3000, icon: "🫘", desc: "Mashed beans with dark spicy palm oil sauce" },
-      { id: 20, name: "Ofada Rice & Stew", category: "Local", price: 5000, icon: "🍱", desc: "Unpolished rice with green pepper sauce" },
-      { id: 21, name: "Crispy French Fries", category: "Sides", price: 2500, icon: "🍟", desc: "Golden salted potato fries" },
-      { id: 22, name: "Loaded Cheese Fries", category: "Sides", price: 3800, icon: "🍟", desc: "Fries topped with melted cheddar and bacon" },
-      { id: 23, name: "Onion Rings", category: "Sides", price: 3000, icon: "🧅", desc: "Battered and deep-fried onion rings" },
-      { id: 24, name: "Garlic Breadsticks", category: "Sides", price: 2800, icon: "🥖", desc: "Warm bread with garlic butter" },
-      { id: 25, name: "Buffalo Wings (6pcs)", category: "Sides", price: 5500, icon: "🍗", desc: "Tossed in hot tangy buffalo sauce" },
-      { id: 26, name: "Fried Plantain Dodo", category: "Sides", price: 2000, icon: "🍌", desc: "Sweet fried ripe plantain slices" },
-      { id: 27, name: "Mozzarella Sticks", category: "Sides", price: 4200, icon: "🧀", desc: "Fried cheese sticks with marinara dip" },
-      { id: 28, name: "Coleslaw Salad", category: "Sides", price: 1800, icon: "🥗", desc: "Fresh shredded cabbage and carrots" },
-      { id: 29, name: "Mac & Cheese Cup", category: "Sides", price: 3200, icon: "🧀", desc: "Creamy baked macaroni and cheese" },
-      { id: 30, name: "Iced Cola", category: "Drinks", price: 1000, icon: "🥤", desc: "Chilled 500ml sparkling soda" },
-      { id: 31, name: "Fresh Orange Juice", category: "Drinks", price: 2500, icon: "🍊", desc: "100% natural cold-pressed oranges" },
-      { id: 32, name: "Strawberry Milkshake", category: "Drinks", price: 3500, icon: "🥤", desc: "Blended ice cream and fresh berries" },
-      { id: 33, name: "Mango Passion Smoothie", category: "Drinks", price: 3800, icon: "🧃", desc: "Tropical fruit blend with yogurt" },
-      { id: 34, name: "Iced Lemon Tea", category: "Drinks", price: 2000, icon: "🍹", desc: "Refreshing brewed tea with lemon" },
-      { id: 35, name: "Sparkling Water", category: "Drinks", price: 1200, icon: "💧", desc: "Zero calorie mineral water" },
-      { id: 36, name: "Chocolate Boba Tea", category: "Drinks", price: 4000, icon: "🧋", desc: "Milk tea with chewy tapioca pearls" },
-      { id: 37, name: "Zobo Drink", category: "Drinks", price: 1500, icon: "🍷", desc: "Chilled hibiscus juice infused with ginger" },
-      { id: 38, name: "Chocolate Lava Cake", category: "Desserts", price: 4500, icon: "🧁", desc: "Warm cake with a molten chocolate center" },
-      { id: 39, name: "New York Cheesecake", category: "Desserts", price: 5000, icon: "🍰", desc: "Classic dense and creamy cheesecake" },
-      { id: 40, name: "Glazed Donuts (3pcs)", category: "Desserts", price: 3000, icon: "🍩", desc: "Soft sugary glazed ring donuts" },
-      { id: 41, name: "Vanilla Ice Cream Bowl", category: "Desserts", price: 2500, icon: "🍨", desc: "Two scoops topped with chocolate syrup" },
-      { id: 42, name: "Red Velvet Cupcake", category: "Desserts", price: 2200, icon: "🧁", desc: "Topped with cream cheese frosting" },
-      { id: 43, name: "Apple Pie Slice", category: "Desserts", price: 3800, icon: "🥧", desc: "Warm cinnamon apple pie slice" },
-      { id: 44, name: "Choco Chip Cookies (4pcs)", category: "Desserts", price: 2000, icon: "🍪", desc: "Freshly baked crunchy cookies" },
-      { id: 45, name: "Crispy Spring Rolls (4pcs)", category: "Sides", price: 2800, icon: "🥟", desc: "Fried vegetable spring rolls" },
-      { id: 46, name: "Meat Pie", category: "Sides", price: 1500, icon: "🥧", desc: "Flaky pastry stuffed with minced meat" },
-      { id: 47, name: "Samosa Box (5pcs)", category: "Sides", price: 3200, icon: "📐", desc: "Crispy triangular minced beef pastries" },
-      { id: 48, name: "Shawarma Wrap", category: "Burgers", price: 4000, icon: "🌯", desc: "Chicken shawarma with sausage and garlic sauce" },
-      { id: 49, name: "Grilled Club Sandwich", category: "Burgers", price: 4500, icon: "🥪", desc: "Triple decker bread with egg and bacon" },
-      { id: 50, name: "Churro Sticks with Fudge", category: "Desserts", price: 3500, icon: "🥖", desc: "Cinnamon sugar sticks with chocolate dip" }
-    ];
-
-    let activeCategory = 'All';
-
+    // --- FOOD RENDERING ---
     function renderFoods(items) {
       const grid = document.getElementById('foodGrid');
       grid.innerHTML = '';
+
       items.forEach(item => {
         const card = document.createElement('div');
         card.className = 'food-card';
         card.innerHTML = `
-          <div class="food-img">${item.icon}</div>
-          <div class="food-title">${item.name}</div>
-          <div class="food-desc">${item.desc}</div>
-          <div class="food-meta">
-            <span class="price">₦${item.price.toLocaleString()}</span>
-            <button class="btn-buy" onclick="openCheckout('${item.name}', ${item.price})">Buy</button>
+          <div>
+            <div class="food-img-frame">
+              <img src="${item.image}" alt="${item.name}" loading="lazy" onerror="this.onerror=null; this.src='${fallbackSVG}';">
+            </div>
+            <div class="food-title">${item.name}</div>
+            <div class="food-desc">${item.desc}</div>
+          </div>
+          <div class="food-footer">
+            <span class="food-price">₦${item.price.toLocaleString()}</span>
+            <button class="btn-add" onclick="addToCart(${item.id})">+ Add</button>
           </div>
         `;
         grid.appendChild(card);
       });
     }
 
-    function filterCategory(cat) {
-      activeCategory = cat;
-      document.querySelectorAll('.category-chip').forEach(chip => {
-        chip.classList.toggle('active', chip.innerText.includes(cat));
-      });
-      filterFoods();
+    function filterCategory(category) {
+      document.querySelectorAll('.category-pill').forEach(p => p.classList.remove('active'));
+      event.target.classList.add('active');
+      if (category === 'All') {
+        renderFoods(foodItems);
+      } else {
+        renderFoods(foodItems.filter(i => i.category === category));
+      }
     }
 
     function filterFoods() {
       const query = document.getElementById('searchInput').value.toLowerCase();
-      const filtered = foodItems.filter(item => {
-        const matchesCat = activeCategory === 'All' || item.category === activeCategory;
-        const matchesQuery = item.name.toLowerCase().includes(query) || item.desc.toLowerCase().includes(query);
-        return matchesCat && matchesQuery;
+      renderFoods(foodItems.filter(i => i.name.toLowerCase().includes(query) || i.desc.toLowerCase().includes(query)));
+    }
+
+    // --- CART SYSTEM ---
+    function addToCart(id) {
+      const item = foodItems.find(f => f.id === id);
+      cart.push(item);
+      updateCartUI();
+      showToast(`${item.name} added to cart`);
+    }
+
+    function updateCartUI() {
+      document.getElementById('cart-count-badge').innerText = cart.length;
+    }
+
+    function openCartModal() {
+      const container = document.getElementById('cart-items-container');
+      container.innerHTML = '';
+      let total = 0;
+
+      cart.forEach((item) => {
+        total += item.price;
+        container.innerHTML += `
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:13px;">
+            <span>${item.name}</span>
+            <b>₦${item.price.toLocaleString()}</b>
+          </div>
+        `;
       });
-      renderFoods(filtered);
+
+      document.getElementById('cart-total-price').innerText = `₦${total.toLocaleString()}`;
+      document.getElementById('cartModal').classList.remove('hidden');
     }
 
-    function openCheckout(name, price) {
-      selectedItem = { name, price };
-      document.getElementById('checkout-item-name').innerText = name;
-      document.getElementById('checkout-item-price').innerText = "₦" + price.toLocaleString();
-      document.getElementById('checkoutModal').classList.remove('hidden');
-    }
+    function closeCartModal() { document.getElementById('cartModal').classList.add('hidden'); }
 
-    function closeCheckout() {
-      document.getElementById('checkoutModal').classList.add('hidden');
-    }
-
+    // --- PAYSTACK CHECKOUT ---
     function payWithPaystack() {
       const address = document.getElementById('delivery-address').value;
-      if (!address) {
-        alert("Please enter a delivery address.");
-        return;
-      }
+      if (!address) return showToast("Please enter a delivery address!");
+      if (cart.length === 0) return showToast("Cart is empty!");
+
+      const totalAmount = cart.reduce((sum, item) => sum + item.price, 0);
 
       const handler = PaystackPop.setup({
         key: PAYSTACK_PUBLIC_KEY,
         email: activeUserEmail,
-        amount: selectedItem.price * 100,
+        amount: totalAmount * 100,
         currency: "NGN",
-        ref: 'FOODIES_' + Math.floor((Math.random() * 1000000000) + 1),
         callback: function(response) {
-          alert('Payment successful! Transaction Ref: ' + response.reference);
-          closeCheckout();
+          closeCartModal();
+          cart = [];
+          updateCartUI();
+          showToast("Payment Successful!");
+          document.getElementById('nav-rider-btn').classList.remove('hidden');
+          toggleRiderChatModal();
         },
-        onClose: function() {
-          alert('Transaction cancelled.');
-        }
+        onClose: function() { showToast("Payment cancelled."); }
       });
-
       handler.openIframe();
     }
+
+    // --- LIVE MAP TRACKING ---
+    function toggleRiderChatModal() {
+      const modal = document.getElementById('chatModal');
+      modal.classList.toggle('hidden');
+      if (!modal.classList.contains('hidden')) {
+        initRiderMap();
+      }
+    }
+
+    function closeChatModal() { document.getElementById('chatModal').classList.add('hidden'); }
+
+    function initRiderMap() {
+      if (!map) {
+        map = L.map('rider-map').setView([9.05785, 7.49508], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+        const riderIcon = L.divIcon({
+          html: '<span style="font-size:24px;">🛵</span>',
+          className: 'rider-leaflet-icon',
+          iconSize: [30, 30]
+        });
+
+        riderMarker = L.marker([9.05785, 7.49508], { icon: riderIcon }).addTo(map);
+      }
+
+      setTimeout(() => map.invalidateSize(), 300);
+
+      if (pollRiderInterval) clearInterval(pollRiderInterval);
+      pollRiderInterval = setInterval(async () => {
+        const res = await fetch('/api/rider-location');
+        const data = await res.json();
+        const pos = [data.lat, data.lng];
+        riderMarker.setLatLng(pos);
+        map.panTo(pos);
+        document.getElementById('live-rider-status').innerText = `● ${data.status}`;
+      }, 1000);
+    }
+
+    function startVisitorMonitoring() {
+      setInterval(async () => {
+        const res = await fetch('/api/active-visitors');
+        const data = await res.json();
+        document.getElementById('live-visitors').innerText = `● Online: ${data.online_users}`;
+      }, 3000);
+    }
+
+    function sendChatMessage() {
+      const input = document.getElementById('chatInput');
+      const text = input.value.trim();
+      if (!text) return;
+
+      const body = document.getElementById('chatMessages');
+      body.innerHTML += `<div class="chat-msg user">${text}</div>`;
+      input.value = '';
+      body.scrollTop = body.scrollHeight;
+
+      setTimeout(() => {
+        body.innerHTML += `<div class="chat-msg rider">Rider received: "${text}". I'm on my way!</div>`;
+        body.scrollTop = body.scrollHeight;
+      }, 1000);
+    }
+
+    function handleChatKeyPress(e) { if (e.key === 'Enter') sendChatMessage(); }
   </script>
 </body>
 </html>
 """
 
 
+# ---------------------------------------------------------
+# FLASK BACKEND ROUTES
+# ---------------------------------------------------------
 @app.route('/')
-def home():
+def index():
     return render_template_string(HTML_TEMPLATE)
 
 
-# ---------------------------------------------------------
-# API ROUTES
-# ---------------------------------------------------------
 @app.route('/api/signup', methods=['POST'])
 def signup():
     data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    pin = data.get('pin')
+    email, password, pin = data.get('email'), data.get('password'), data.get('pin')
 
     if not email or not password or not pin:
-        return jsonify({"error": "Please fill in email, password, and 6-digit PIN"}), 400
-
-    if len(pin) != 6 or not pin.isdigit():
-        return jsonify({"error": "PIN must be exactly 6 digits"}), 400
-
+        return jsonify({"success": False, "error": "All fields are required"}), 400
     if get_user(email):
-        return jsonify({"error": "An account with this email already exists"}), 400
+        return jsonify({"success": False, "error": "User already exists"}), 400
 
     save_user(email, password, pin)
     session['user'] = email
-
-    return jsonify({"success": True, "email": email})
+    return jsonify({"success": True, "email": email, "username": extract_username(email)})
 
 
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-
+    email, password = data.get('email'), data.get('password')
     user = get_user(email)
-    if not user or user["password"] != password:
-        return jsonify({"error": "Invalid email or password"}), 401
 
-    session['pending_user'] = email
-    return jsonify({"require_pin": True})
+    if user and user['password'] == password:
+        session['temp_user'] = email
+        return jsonify({"require_pin": True})
+    return jsonify({"require_pin": False, "error": "Invalid email or password"}), 401
 
 
 @app.route('/api/verify-pin', methods=['POST'])
 def verify_pin():
-    data = request.get_json()
-    entered_pin = data.get('pin')
-    email = session.get('pending_user')
-
+    pin = request.get_json().get('pin')
+    email = session.get('temp_user')
     user = get_user(email) if email else None
-    if not user:
-        return jsonify({"error": "Session expired"}), 400
 
-    if user["pin"] == entered_pin:
-        session['user'] = session.pop('pending_user', None)
-        return jsonify({"success": True, "email": email})
-
-    return jsonify({"error": "Incorrect PIN. Try again."}), 400
+    if user and user['pin'] == pin:
+        session['user'] = email
+        session.pop('temp_user', None)
+        return jsonify({"success": True, "email": email, "username": extract_username(email)})
+    return jsonify({"success": False, "error": "Incorrect PIN"}), 401
 
 
 @app.route('/api/logout', methods=['POST'])
@@ -459,5 +757,28 @@ def logout():
     return jsonify({"success": True})
 
 
+@app.route('/api/rider-location', methods=['GET'])
+def get_rider_location():
+    """Simulates real-time rider progression on each poll."""
+    if rider_status['lat'] < rider_status['dest_lat']:
+        rider_status['lat'] += 0.0003
+        rider_status['lng'] -= 0.0015
+    else:
+        rider_status['status'] = "Arrived at location!"
+    return jsonify(rider_status)
+
+
+@app.route('/api/active-visitors', methods=['GET'])
+def get_active_visitors():
+    """Returns total online users in the last 2 minutes."""
+    now = time.time()
+    online = [ip for ip, last_seen in active_visitors.items() if now - last_seen < 120]
+    return jsonify({"online_users": len(online)})
+
+
+# ---------------------------------------------------------
+# SERVER RUNNER
+# ---------------------------------------------------------
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
