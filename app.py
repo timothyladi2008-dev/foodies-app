@@ -1930,7 +1930,7 @@ HTML_TEMPLATE = """
         showToast("All fields are required (email, password, 6-digit PIN)", "warning");
         return;
       }
-      if (pin.length !== 6 || !/^\d+$/.test(pin)) {
+      if (pin.length !== 6 || !/^d+$/.test(pin)) {
         showToast("PIN must be exactly 6 digits", "warning");
         return;
       }
